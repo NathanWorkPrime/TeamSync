@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  teamsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: teamsync-app
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - DATABASE_FILE=teamsync.db
+      - GITHUB_PAT=${GITHUB_PAT}
+      - GITHUB_REPO=${GITHUB_REPO}
+      - INBOUND_WEBHOOK_SECRET=${INBOUND_WEBHOOK_SECRET}
+    volumes:
+      - teamsync-data:/app/backend
+
+  oct-server:
+    image: eclipse-oct/open-collaboration-tools:latest
+    container_name: oct-server-dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - NODE_ENV=production
+    volumes:
+      - oct-data:/app/data
+
+volumes:
+  teamsync-data:
+  oct-data:
