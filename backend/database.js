@@ -442,6 +442,8 @@ function initializeSchema() {
       console.log("[Database] SKIP_SEED=true detected. Skipping user database seeding.");
     }
 
+    // TODO: Temporary stopgap for colleague onboarding.
+    // Replace with real project creation flow once registration UI access is defined for teams.
     // Always seed core repositories on startup if they don't exist
     db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
       if (row && row.count === 0) {
