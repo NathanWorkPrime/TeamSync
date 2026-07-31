@@ -6,10 +6,9 @@ import Projects from './pages/Projects';
 import RepoView from './pages/RepoView';
 import Session from './pages/Session';
 import Integrations from './pages/Integrations';
-import GlobalSettings from './pages/GlobalSettings';
 import { io } from 'socket.io-client';
 
-const socket = io(import.meta.env.VITE_API_URL || window.location.origin, { autoConnect: false });
+const socket = io('http://localhost:5000', { autoConnect: false });
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -18,7 +17,6 @@ export default function App() {
   // Core Data State
   const [users, setUsers] = useState([]);
   const [repos, setRepos] = useState([]);
-  const [reposError, setReposError] = useState(null);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [branches, setBranches] = useState([]);
   const [tickets, setTickets] = useState([]);
@@ -41,7 +39,6 @@ export default function App() {
   });
 
   const [sessionError, setSessionError] = useState(null);
-  const [joinRequest, setJoinRequest] = useState(null);
 
   // Fetch initial seed users
   const fetchUsers = async () => {
@@ -59,27 +56,13 @@ export default function App() {
   // Fetch company repositories
   const fetchRepos = async () => {
     try {
-      setReposError(null);
-      const headers = {};
-      const cached = localStorage.getItem('teamsync_current_user');
-      let activeUser = currentUser;
-      if (!activeUser && cached) {
-        try { activeUser = JSON.parse(cached); } catch (e) {}
-      }
-      if (activeUser) {
-        headers['X-User-Username'] = activeUser.username;
-      }
-      const res = await fetch('/api/repos', { headers });
+      const res = await fetch('/api/repos');
       if (res.ok) {
         const data = await res.json();
         setRepos(data);
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        setReposError(errData.message || 'Failed to verify repository access.');
       }
     } catch (err) {
       console.error('Error fetching repos:', err);
-      setReposError(err.message || 'Network error fetching projects.');
     }
   };
 
@@ -153,45 +136,26 @@ export default function App() {
   useEffect(() => {
     fetchUsers();
     
-    // Handle GitHub OAuth callback redirect
-    const urlParams = new URLSearchParams(window.location.search);
-    const oauthUsername = urlParams.get('username');
-    if (oauthUsername) {
-      // Clear URL parameters
-      window.history.replaceState({}, document.title, window.location.pathname);
-      
-      // Fetch users list to find the matching user profile
-      fetch('/api/users')
-        .then(res => res.json())
-        .then(usersList => {
-          const matchedUser = usersList.find(u => u.username === oauthUsername.toLowerCase().trim());
-          if (matchedUser) {
-            handleLogin(matchedUser);
-          }
-        })
-        .catch(err => console.error('[App] OAuth user retrieval failed:', err));
-    } else {
-      // Auto-login from local storage if profile cached
-      const cached = localStorage.getItem('teamsync_current_user');
-      if (cached) {
-        try {
-          const user = JSON.parse(cached);
-          setCurrentUser(user);
-          setActiveView('projects');
-          
-          // Push user credentials to companion extension on load
-          fetch('http://localhost:37845/configure', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user_id: user.id,
-              username: user.username,
-              server_url: window.location.origin
-            })
-          }).catch(() => {});
-        } catch (e) {
-          console.warn('[App] Failed to parse cached user:', e);
-        }
+    // Auto-login from local storage if profile cached
+    const cached = localStorage.getItem('teamsync_current_user');
+    if (cached) {
+      try {
+        const user = JSON.parse(cached);
+        setCurrentUser(user);
+        setActiveView('home');
+        
+        // Push user credentials to companion extension on load
+        fetch('http://localhost:37845/configure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: user.id,
+            username: user.username,
+            server_url: window.location.origin
+          })
+        }).catch(() => {});
+      } catch (e) {
+        console.warn('[App] Failed to parse cached user:', e);
       }
     }
   }, []);
@@ -214,23 +178,9 @@ export default function App() {
       }));
     });
 
-    socket.on('session:join_response', ({ approve, error }) => {
-      setJoinRequest(prev => {
-        if (!prev) return null;
-        if (approve) {
-          if (prev.onApproved) prev.onApproved();
-          return null;
-        } else {
-          setSessionError(error || 'The session host has denied your request to join.');
-          return null;
-        }
-      });
-    });
-
     return () => {
       socket.off('presence:update');
       socket.off('activity:new');
-      socket.off('session:join_response');
       socket.disconnect();
     };
   }, [currentUser]);
@@ -267,7 +217,7 @@ export default function App() {
   // Handle username selection
   const handleLogin = (user) => {
     setCurrentUser(user);
-    setActiveView('projects');
+    setActiveView('home');
     localStorage.setItem('teamsync_current_user', JSON.stringify(user));
 
     // Configure companion extension with logged in user context
@@ -346,11 +296,10 @@ export default function App() {
       let sessionLink = '';
       let octRoomId = '';
 
-      let activeRoom = null;
       try {
         const activeRoomRes = await fetch(`/api/session-rooms/active?repo=${selectedRepo}&branch=${branchName}`);
         if (activeRoomRes.ok) {
-          activeRoom = await activeRoomRes.json();
+          const activeRoom = await activeRoomRes.json();
           if (activeRoom) {
             sessionLink = activeRoom.session_link;
             octRoomId = activeRoom.oct_room_id;
@@ -362,72 +311,26 @@ export default function App() {
       }
 
       if (sessionLink) {
-        const isHost = activeRoom && activeRoom.created_by_user_id === currentUser.id;
-        
-        const proceedJoin = async () => {
-          try {
-            console.log('[App] Instructing companion extension to join existing session:', sessionLink);
-            const extRes = await fetch('http://localhost:37845/join-session', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                repo: selectedRepo,
-                branch: branchName,
-                room_id: octRoomId,
-                session_link: sessionLink
-              })
-            });
-            if (!extRes.ok) {
-              throw new Error('Companion extension failed to join the session.');
-            }
-          } catch (joinErr) {
-            console.error('[App] Companion extension failed to join session:', joinErr.message);
-            setSessionError('Failed to connect to the companion extension. Please ensure VS Code/Antigravity is open and running.');
-            return;
-          }
-
-          try {
-            const res = await fetch('/api/presence', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                user_id: currentUser.id,
-                repo_name: selectedRepo,
-                branch_name: branchName,
-                session_link: sessionLink
-              })
-            });
-
-            if (res.ok) {
-              setSessionData({
-                repo: selectedRepo,
-                branch: branchName,
-                sessionLink: sessionLink
-              });
-              fetchPresence();
-              fetchTodayData();
-              setRepoSubTab('sessions');
-              setActiveView('repo');
-            }
-          } catch (err) {
-            console.error('Error starting session:', err);
-          }
-        };
-
-        if (isHost) {
-          await proceedJoin();
-        } else {
-          setJoinRequest({
-            status: 'pending',
-            hostName: activeRoom.creator_display_name || 'Host',
-            roomId: activeRoom.id,
-            onApproved: proceedJoin
+        // Active room exists! Join it via companion extension
+        try {
+          console.log('[App] Instructing companion extension to join existing session:', sessionLink);
+          const extRes = await fetch('http://localhost:37845/join-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              repo: selectedRepo,
+              branch: branchName,
+              room_id: octRoomId,
+              session_link: sessionLink
+            })
           });
-          socket.emit('session:request_join', {
-            roomId: activeRoom.id,
-            userId: currentUser.id,
-            username: currentUser.display_name || currentUser.username
-          });
+          if (!extRes.ok) {
+            throw new Error('Companion extension failed to join the session.');
+          }
+        } catch (joinErr) {
+          console.error('[App] Companion extension failed to join session:', joinErr.message);
+          setSessionError('Failed to connect to the companion extension. Please ensure VS Code/Antigravity is open and running.');
+          return;
         }
       } else {
         // No active room! Create a new one via companion extension
@@ -465,76 +368,33 @@ export default function App() {
           setSessionError('Could not start a companion session. Make sure VS Code/Antigravity is running with the extension enabled.');
           return;
         }
-        try {
-          const res = await fetch('/api/presence', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user_id: currentUser.id,
-              repo_name: selectedRepo,
-              branch_name: branchName,
-              session_link: sessionLink
-            })
-          });
-
-          if (res.ok) {
-            setSessionData({
-              repo: selectedRepo,
-              branch: branchName,
-              sessionLink: sessionLink
-            });
-            fetchPresence();
-            fetchTodayData();
-            setRepoSubTab('sessions');
-            setActiveView('repo');
-          }
-        } catch (err) {
-          console.error('Error starting session:', err);
-        }
       }
-    }
-  };
 
-  // Leave active session (host ends, rider leaves)
-  const handleLeaveSession = async (roomId, isHost) => {
-    try {
-      if (isHost) {
-        const res = await fetch(`/api/session-rooms/${roomId}/close`, {
+      try {
+        const res = await fetch('/api/presence', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: currentUser.id })
+          body: JSON.stringify({
+            user_id: currentUser.id,
+            repo_name: selectedRepo,
+            branch_name: branchName,
+            session_link: sessionLink
+          })
         });
+
         if (res.ok) {
-          fetch('http://localhost:37845/leave-session', {
-            method: 'POST'
-          }).catch(() => {});
-          
+          setSessionData({
+            repo: selectedRepo,
+            branch: branchName,
+            sessionLink: sessionLink
+          });
           fetchPresence();
           fetchTodayData();
-          if (selectedRepo) fetchBranches(selectedRepo);
-          
-          setSessionData(null);
-          setActiveView('repo');
+          setActiveView('session');
         }
-      } else {
-        const res = await fetch(`/api/presence/${currentUser.id}`, {
-          method: 'DELETE'
-        });
-        if (res.ok) {
-          fetch('http://localhost:37845/leave-session', {
-            method: 'POST'
-          }).catch(() => {});
-          
-          fetchPresence();
-          fetchTodayData();
-          if (selectedRepo) fetchBranches(selectedRepo);
-          
-          setSessionData(null);
-          setActiveView('repo');
-        }
+      } catch (err) {
+        console.error('Error starting session:', err);
       }
-    } catch (err) {
-      console.error('Error leaving session:', err);
     }
   };
 
@@ -690,45 +550,6 @@ export default function App() {
     }
   };
 
-  // Add User profile
-  const handleAddUser = async (userPayload) => {
-    try {
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(userPayload)
-      });
-      if (res.ok) {
-        fetchUsers();
-      } else {
-        const errData = await res.json();
-        throw new Error(errData.error || 'Failed to add user.');
-      }
-    } catch (err) {
-      console.error('Error adding user:', err);
-      alert(err.message);
-    }
-  };
-
-  // Remove User profile
-  const handleRemoveUser = async (userId) => {
-    try {
-      const res = await fetch(`/api/users/${userId}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        fetchUsers();
-      } else {
-        const errData = await res.json();
-        throw new Error(errData.error || 'Failed to remove user.');
-      }
-    } catch (err) {
-      console.error('Error removing user:', err);
-      alert(err.message);
-    }
-  };
-
-
   // Logout utility
   const handleLogout = () => {
     localStorage.removeItem('teamsync_current_user');
@@ -770,20 +591,11 @@ export default function App() {
           />
         );
       case 'projects':
-        return (
-          <Projects 
-            repos={repos} 
-            reposError={reposError} 
-            onSelectRepo={handleSelectRepo} 
-            onRegisterSuccess={fetchRepos} 
-            onRetry={fetchRepos}
-          />
-        );
+        return <Projects repos={repos} onSelectRepo={handleSelectRepo} />;
       case 'repo':
         return (
           <RepoView 
             repoName={selectedRepo} 
-            githubRepo={repos.find(r => r.name === selectedRepo)?.github_repo}
             onBack={() => setActiveView('projects')} 
             branches={branches}
             tickets={tickets}
@@ -793,9 +605,6 @@ export default function App() {
             onWorkOnBranch={handleWorkOnBranch}
             onAddTicket={handleAddTicket}
             onUpdateTicketStatus={handleUpdateTicketStatus}
-            onLeaveSession={handleLeaveSession}
-            onAddUser={handleAddUser}
-            onRemoveUser={handleRemoveUser}
           />
         );
       case 'session':
@@ -806,7 +615,6 @@ export default function App() {
             currentUser={currentUser}
             onSavePresence={handleSavePresence}
             socket={socket}
-            onLeaveSession={handleLeaveSession}
           />
         );
       case 'integrations':
@@ -814,14 +622,6 @@ export default function App() {
           <Integrations 
             integrations={integrations} 
             onRegisterIntegration={handleRegisterIntegration}
-          />
-        );
-      case 'global-settings':
-        return (
-          <GlobalSettings 
-            users={users}
-            onRemoveUser={handleRemoveUser}
-            onViewChange={handleViewChange}
           />
         );
       default:
@@ -875,80 +675,6 @@ export default function App() {
         )}
         {renderView()}
       </main>
-
-      {joinRequest && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(15, 23, 42, 0.85)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-          backdropFilter: 'blur(4px)',
-          fontFamily: 'Inter, sans-serif'
-        }}>
-          <div className="card" style={{
-            width: '420px',
-            padding: '28px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px',
-            textAlign: 'center',
-            border: '2px solid var(--teal)',
-            boxShadow: '0 8px 32px rgba(77, 238, 234, 0.15)',
-            background: 'var(--surface)',
-            borderRadius: '12px'
-          }}>
-            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--teal)', margin: 0 }}>
-              {joinRequest.status === 'pending' && 'Requesting Workspace Access'}
-              {joinRequest.status === 'denied' && 'Access Denied'}
-              {joinRequest.status === 'offline' && 'Host Offline'}
-            </h3>
-            
-            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
-              {joinRequest.status === 'pending' && (
-                <>
-                  Sending request to join <strong>{joinRequest.hostName}</strong>'s session.
-                  <br />
-                  <span style={{ display: 'inline-block', marginTop: '12px', fontSize: '12px', color: 'var(--text-dim)' }}>
-                    ⚠️ Note: By joining, you will co-edit files directly on the host's local machine workspace.
-                  </span>
-                </>
-              )}
-              {joinRequest.status === 'denied' && `The session host, ${joinRequest.hostName}, has denied your access request.`}
-              {joinRequest.status === 'offline' && `The session host, ${joinRequest.hostName}, is currently offline.`}
-            </p>
-            
-            <div style={{ display: 'flex', justifyContent: 'center', marginTop: '8px' }}>
-              {joinRequest.status === 'pending' ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
-                  <div className="spin" style={{ width: '20px', height: '20px', border: '2px solid var(--teal)', borderTopColor: 'transparent', borderRadius: '50%' }}></div>
-                  <span style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Waiting for host approval...</span>
-                  <button 
-                    onClick={() => setJoinRequest(null)}
-                    className="btn-secondary"
-                    style={{ padding: '6px 16px', fontSize: '12px', marginTop: '8px', cursor: 'pointer', borderRadius: '6px' }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => setJoinRequest(null)}
-                  className="btn-primary"
-                  style={{ padding: '8px 20px', fontSize: '13px', cursor: 'pointer', borderRadius: '6px' }}
-                >
-                  Close
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

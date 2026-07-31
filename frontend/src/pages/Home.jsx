@@ -160,15 +160,6 @@ export default function Home({
       case 'session:created':
         text = `created collaborative session workspace TS-${e.session_id} on ${e.repo_name}/${e.branch_name}`;
         break;
-      case 'git:commit':
-        text = `committed to ${e.branch_name || 'main'} of ${e.repo_name}: "${meta.message || 'commit'}" (${meta.hash ? meta.hash.substring(0, 7) : ''})`;
-        break;
-      case 'git:branch_switch':
-        text = `switched branch from ${meta.previous_branch || 'main'} to ${meta.new_branch || 'main'} on ${e.repo_name}`;
-        break;
-      case 'git:conflict':
-        text = `encountered merge conflicts in ${meta.conflicted_files ? meta.conflicted_files.join(', ') : 'files'} on ${e.repo_name}/${e.branch_name}`;
-        break;
       default:
         if (e.event_type.startsWith('deploy:')) {
           text = `triggered automated deployment (${meta.status || 'success'}) on ${e.repo_name}/${e.branch_name}`;
@@ -326,30 +317,15 @@ export default function Home({
                     background: 'var(--surface-2)',
                     border: '1px solid var(--border)',
                     borderRadius: '8px',
-                    fontSize: '12.5px',
-                    boxShadow: '0 0 10px var(--teal-glow)'
+                    fontSize: '12.5px'
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
-                    <div style={{ position: 'relative', display: 'inline-block', flexShrink: 0 }}>
-                      <div className="avatar" style={{ backgroundColor: p.avatar_color || 'var(--violet)', color: 'rgba(15, 23, 42, 0.85)', width: '24px', height: '24px', fontSize: '11px', flexShrink: 0 }}>
-                        {p.user_name ? p.user_name.split(' ').map(n => n[0]).join('').toUpperCase() : 'U'}
-                      </div>
-                      <span className="live-avatar-badge" style={{
-                        position: 'absolute',
-                        bottom: '-1px',
-                        right: '-1px',
-                        width: '7px',
-                        height: '7px',
-                        borderRadius: '50%',
-                        backgroundColor: 'var(--green)',
-                        border: '1.5px solid var(--surface)',
-                        display: 'block',
-                        boxShadow: '0 0 4px var(--green)'
-                      }}></span>
+                    <div className="avatar" style={{ backgroundColor: p.avatar_color || 'var(--violet)', color: '#0C1116', width: '24px', height: '24px', fontSize: '11px', flexShrink: 0 }}>
+                      {p.user_name ? p.user_name.split(' ').map(n => n[0]).join('').toUpperCase() : 'U'}
                     </div>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.user_name}</div>
+                      <div style={{ fontWeight: 600, color: '#ffffff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.user_name}</div>
                       <div style={{ fontSize: '10.5px', color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {p.repo_name} · <span className="mono">{p.branch_name}</span>
                       </div>
@@ -587,34 +563,6 @@ export default function Home({
                         </span>
                         <span>•</span>
                         <span>{new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        {e.event_type?.startsWith('git:') && (
-                          <>
-                            <span>•</span>
-                            <span style={{
-                              background: 'rgba(77, 238, 234, 0.08)',
-                              border: '1px solid rgba(77, 238, 234, 0.3)',
-                              color: 'var(--teal)',
-                              fontSize: '8.5px',
-                              fontWeight: 800,
-                              letterSpacing: '0.5px',
-                              padding: '1px 5px',
-                              borderRadius: '4px',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '3px'
-                            }}>
-                              <span style={{
-                                width: '4px',
-                                height: '4px',
-                                borderRadius: '50%',
-                                backgroundColor: 'var(--teal)',
-                                display: 'inline-block',
-                                animation: 'pulse 1.5s infinite'
-                              }}></span>
-                              ⚡ LIVE
-                            </span>
-                          </>
-                        )}
                       </div>
                     </div>
                   </div>
