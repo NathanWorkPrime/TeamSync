@@ -360,7 +360,39 @@ export function activate(context: vscode.ExtensionContext) {
       const octActive = await isRealOCTActive();
 
       try {
-        sessionLink = await executeOCTCommand('share');
+        const cmdResult = await executeOCTCommand('share');
+        sessionLink = cmdResult || '';
+        
+        // If the command returned empty, check the clipboard for the generated room token
+        if (!sessionLink) {
+          console.log('[TeamSync Companion] Command returned empty. Polling clipboard for session link/token...');
+          for (let i = 0; i < 6; i++) { // Poll 6 times (3 seconds total)
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const clipboardText = (await vscode.env.clipboard.readText() || '').trim();
+            if (clipboardText) {
+              if (clipboardText.startsWith('oct://') || clipboardText.startsWith('http://') || clipboardText.startsWith('https://')) {
+                sessionLink = clipboardText;
+                break;
+              } else if (/^[a-zA-Z0-9_-]{20,30}$/.test(clipboardText)) {
+                sessionLink = `oct://join/${clipboardText}`;
+                break;
+              }
+            }
+          }
+        }
+
+        // If still empty, trigger fallback or throw error
+        if (!sessionLink) {
+          if (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test) {
+            const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase() + 
+                               '-' + 
+                               Math.random().toString(36).substring(2, 6).toUpperCase();
+            sessionLink = `oct://join/TS-${randomCode}`;
+            vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): No session link captured. Using mock: ${sessionLink}`);
+          } else {
+            throw new Error('Failed to capture Eclipse OCT session link from clipboard.');
+          }
+        }
       } catch (cmdErr: any) {
         console.warn('[TeamSync Companion] Failed to run real OCT command:', cmdErr.message);
         
@@ -424,16 +456,22 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         await executeOCTCommand('join', session_link);
       } catch (cmdErr: any) {
-        console.warn('[TeamSync Companion] Failed to run real OCT join command:', cmdErr.message);
-        
-        if (octActive) {
-          throw new Error(`Real Eclipse OCT session join failed: ${cmdErr.message}`);
-        }
+        console.warn('[TeamSync Companion] Failed to join with full link, trying room ID extraction:', cmdErr.message);
+        try {
+          const roomId = session_link.split('/').pop() || session_link;
+          await executeOCTCommand('join', roomId);
+        } catch (innerErr: any) {
+          console.warn('[TeamSync Companion] Failed to run real OCT join command:', innerErr.message);
+          
+          if (octActive) {
+            throw new Error(`Real Eclipse OCT session join failed: ${innerErr.message}`);
+          }
 
-        if (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test) {
-          vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
-        } else {
-          throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to join sessions.');
+          if (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test) {
+            vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
+          } else {
+            throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to join sessions.');
+          }
         }
       }
 
