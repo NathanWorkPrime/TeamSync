@@ -245,7 +245,6 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
     }
   }
   
-  let hasAccess = false;
   try {
     const token = userToken || process.env.GITHUB_PAT;
     if (!token) {
@@ -262,19 +261,18 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
     });
     
     if (response.status === 204) {
-      hasAccess = true;
+      collaboratorCache.set(cacheKey, { hasAccess: true, expiresAt: now + CACHE_TTL_MS });
+      return true;
+    } else if (response.status === 404 || response.status === 403) {
+      collaboratorCache.set(cacheKey, { hasAccess: false, expiresAt: now + CACHE_TTL_MS });
+      return false;
+    } else {
+      throw new Error(`GitHub API returned status ${response.status}`);
     }
   } catch (err) {
-    console.error(`[CollaboratorCheck] Error checking access for ${username} on ${githubRepo}:`, err.message);
-    hasAccess = false;
+    console.error(`[CollaboratorCheck] Transient error checking access for ${username} on ${githubRepo}:`, err.message);
+    throw err;
   }
-  
-  collaboratorCache.set(cacheKey, {
-    hasAccess,
-    expiresAt: now + CACHE_TTL_MS
-  });
-  
-  return hasAccess;
 }
 
 function isGitHubOAuthConfigured() {
@@ -437,16 +435,32 @@ app.get('/api/repos', async (req, res) => {
       
       // Filter repos by collaborator access on GitHub
       const filteredRepos = [];
+      let checkFailed = false;
+      let failureReason = '';
+      
       for (const repo of repos) {
         if (!repo.github_repo) {
           filteredRepos.push(repo); // Local-only repos visible to everyone
           continue;
         }
         
-        const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
-        if (hasAccess) {
-          filteredRepos.push(repo);
+        try {
+          const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
+          if (hasAccess) {
+            filteredRepos.push(repo);
+          }
+        } catch (err) {
+          checkFailed = true;
+          failureReason = err.message;
+          break;
         }
+      }
+      
+      if (checkFailed) {
+        return res.status(503).json({
+          error: 'GitHub Access Verification Error',
+          message: `Could not verify collaborator access on GitHub: ${failureReason}. Please check your connection or reload the page.`
+        });
       }
       
       res.json(filteredRepos);

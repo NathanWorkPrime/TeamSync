@@ -18,6 +18,7 @@ export default function App() {
   // Core Data State
   const [users, setUsers] = useState([]);
   const [repos, setRepos] = useState([]);
+  const [reposError, setReposError] = useState(null);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [branches, setBranches] = useState([]);
   const [tickets, setTickets] = useState([]);
@@ -58,6 +59,7 @@ export default function App() {
   // Fetch company repositories
   const fetchRepos = async () => {
     try {
+      setReposError(null);
       const headers = {};
       const cached = localStorage.getItem('teamsync_current_user');
       let activeUser = currentUser;
@@ -71,9 +73,13 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setRepos(data);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setReposError(errData.message || 'Failed to verify repository access.');
       }
     } catch (err) {
       console.error('Error fetching repos:', err);
+      setReposError(err.message || 'Network error fetching projects.');
     }
   };
 
@@ -764,7 +770,15 @@ export default function App() {
           />
         );
       case 'projects':
-        return <Projects repos={repos} onSelectRepo={handleSelectRepo} onRegisterSuccess={fetchRepos} />;
+        return (
+          <Projects 
+            repos={repos} 
+            reposError={reposError} 
+            onSelectRepo={handleSelectRepo} 
+            onRegisterSuccess={fetchRepos} 
+            onRetry={fetchRepos}
+          />
+        );
       case 'repo':
         return (
           <RepoView 

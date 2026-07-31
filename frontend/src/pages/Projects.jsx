@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, AlertTriangle, RefreshCw, FolderPlus } from 'lucide-react';
 
-export default function Projects({ repos, onSelectRepo, onRegisterSuccess }) {
+export default function Projects({ repos, reposError, onSelectRepo, onRegisterSuccess, onRetry }) {
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -78,6 +78,36 @@ export default function Projects({ repos, onSelectRepo, onRegisterSuccess }) {
           </button>
         </div>
       </div>
+
+      {reposError && (
+        <div className="alert-card" style={{
+          background: 'rgba(239, 68, 68, 0.1)',
+          border: '1px solid rgba(239, 68, 68, 0.2)',
+          borderRadius: '10px',
+          padding: '16px 20px',
+          marginBottom: '24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          color: 'var(--red)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <AlertTriangle size={18} />
+            <span style={{ fontSize: '13px', fontWeight: 500 }}>{reposError}</span>
+          </div>
+          {onRetry && (
+            <button 
+              onClick={onRetry} 
+              className="btn-secondary" 
+              style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--red)', borderColor: 'var(--red)' }}
+            >
+              <RefreshCw size={13} className="retry-icon" />
+              Retry Verification
+            </button>
+          )}
+        </div>
+      )}
       
       <div className="grid">
         {repos.map((repo) => (

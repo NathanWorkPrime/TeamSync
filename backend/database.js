@@ -424,7 +424,7 @@ function initializeSchema() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
 
-    // Seed initial users and repositories if not skipped
+    // Seed initial users if not skipped
     const skipSeed = process.env.SKIP_SEED && process.env.SKIP_SEED.trim().toLowerCase() === 'true';
     if (!skipSeed) {
       db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
@@ -438,20 +438,21 @@ function initializeSchema() {
           stmt.finalize();
         }
       });
-
-      db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
-        if (row && row.count === 0) {
-          console.log("Seeding repositories...");
-          const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
-          const now = new Date().toISOString();
-          stmt.run("TeamSync", "Operational control centre for software development (local workspace).", "NathanWorkPrime/TeamSync", 1, now);
-          stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
-          stmt.finalize();
-        }
-      });
     } else {
-      console.log("[Database] SKIP_SEED=true detected. Skipping database seeding.");
+      console.log("[Database] SKIP_SEED=true detected. Skipping user database seeding.");
     }
+
+    // Always seed core repositories on startup if they don't exist
+    db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
+      if (row && row.count === 0) {
+        console.log("Seeding core repositories...");
+        const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
+        const now = new Date().toISOString();
+        stmt.run("TeamSync", "Operational control centre for software development.", "NathanWorkPrime/TeamSync", 1, now);
+        stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
+        stmt.finalize();
+      }
+    });
   });
 }
 
