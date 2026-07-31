@@ -3,16 +3,39 @@ const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+const repoPathsCache = new Map();
+
+// Load the repository paths cache from database
+function loadRepoPathsCache() {
+  return new Promise((resolve, reject) => {
+    db.all("SELECT name, local_path FROM repositories", [], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        rows.forEach(row => {
+          if (row.local_path) {
+            repoPathsCache.set(row.name, row.local_path);
+          }
+        });
+        resolve();
+      }
+    });
+  });
+}
+
 // Helper to resolve repository path on local filesystem
 function getRepoPath(repoName) {
-  const reposDir = process.env.REPOS_DIR;
-  if (reposDir) {
-    if (!repoName) return reposDir;
-    return path.join(reposDir, repoName === 'TeamSync' ? 'TeamDash' : repoName);
+  if (repoName && repoPathsCache.has(repoName)) {
+    return repoPathsCache.get(repoName);
   }
-  if (!repoName) return path.resolve(__dirname, '../../');
+  
+  // Safe default fallback if cache is empty during initial migration checks
+  const appRoot = path.resolve(__dirname, '../../');
+  if (!repoName || repoName === 'TeamSync') {
+    return appRoot;
+  }
   const parentDir = path.resolve(__dirname, '../../../');
-  return path.join(parentDir, repoName === 'TeamSync' ? 'TeamDash' : repoName);
+  return path.join(parentDir, repoName);
 }
 
 /**
@@ -1617,5 +1640,7 @@ module.exports = {
   approvePullRequest,
   mergePullRequest,
   getBranchProtection,
-  updateBranchProtection
+  updateBranchProtection,
+  loadRepoPathsCache,
+  repoPathsCache
 };

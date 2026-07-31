@@ -11,6 +11,8 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
   const [githubRepo, setGithubRepo] = useState('');
   const [branchStrategy, setBranchStrategy] = useState('main-only');
   const [allowSandboxDeploy, setAllowSandboxDeploy] = useState(false);
+  const [localPath, setLocalPath] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -30,7 +32,8 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
           description: description.trim(),
           github_repo: githubRepo.trim() || null,
           branch_strategy: branchStrategy,
-          allow_sandbox_deploy: allowSandboxDeploy
+          allow_sandbox_deploy: allowSandboxDeploy,
+          local_path: localPath.trim()
         })
       });
 
@@ -44,12 +47,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         alert(`Warning: ${data.warning}`);
       }
 
-      setName('');
-      setDescription('');
-      setGithubRepo('');
-      setBranchStrategy('main-only');
-      setAllowSandboxDeploy(false);
-      setShowModal(false);
+      closeModal();
       
       if (onRegisterSuccess) {
         onRegisterSuccess();
@@ -60,6 +58,19 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const closeModal = () => {
+    setShowModal(false);
+    setError(null);
+    setName('');
+    setDescription('');
+    setGithubRepo('');
+    setBranchStrategy('main-only');
+    setAllowSandboxDeploy(false);
+    setLocalPath('');
+    setShareCode('');
+    setShowAdvanced(false);
   };
 
   const handleJoinSubmit = async (e) => {
@@ -91,8 +102,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         throw new Error(data.error || 'Failed to join project.');
       }
 
-      setShareCode('');
-      setShowModal(false);
+      closeModal();
       
       if (onRegisterSuccess) {
         onRegisterSuccess();
@@ -279,10 +289,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
               <button 
                 type="button" 
                 style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '18px', cursor: 'pointer' }}
-                onClick={() => {
-                  setShowModal(false);
-                  setError(null);
-                }}
+                onClick={closeModal}
               >
                 ×
               </button>
@@ -368,6 +375,45 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
                   </div>
                 </div>
 
+                <div style={{ marginTop: '4px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvanced(!showAdvanced)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--teal)',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: 0,
+                      outline: 'none'
+                    }}
+                  >
+                    {showAdvanced ? '▼ Hide Advanced Path Settings' : '▶ Show Advanced Path Settings'}
+                  </button>
+                  
+                  {showAdvanced && (
+                    <div className="form-group" style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '12px' }}>
+                      <label style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>Local Folder Path Override</label>
+                      <input 
+                        type="text" 
+                        className="form-control"
+                        value={localPath}
+                        onChange={(e) => setLocalPath(e.target.value)}
+                        placeholder="e.g. C:\var\www\MySuperApp"
+                        style={{ fontSize: '13px', padding: '10px' }}
+                      />
+                      <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '4px' }}>
+                        Leave blank to automatically resolve the repository location relative to the VM's workspace root.
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div className="form-group">
                   <label style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>Initial Branch Strategy</label>
                   <select 
@@ -405,10 +451,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
                   <button 
                     type="button" 
                     className="btn-secondary" 
-                    onClick={() => {
-                      setShowModal(false);
-                      setError(null);
-                    }}
+                    onClick={closeModal}
                     style={{ padding: '8px 16px', fontSize: '13px' }}
                   >
                     Cancel

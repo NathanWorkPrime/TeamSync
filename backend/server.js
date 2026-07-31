@@ -495,9 +495,24 @@ app.get('/api/repos', async (req, res) => {
 
 // POST /api/repos - Register a new repository
 app.post('/api/repos', (req, res) => {
-  const { name, description, github_repo, allow_sandbox_deploy, branch_strategy } = req.body;
+  const { name, description, github_repo, allow_sandbox_deploy, branch_strategy, local_path } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'Repository name is required.' });
+  }
+
+  const fs = require('fs');
+  const path = require('path');
+  const appRoot = path.resolve(__dirname, '../'); // e.g. C:\var\www\teamsync
+  const parentDir = path.resolve(__dirname, '../../'); // e.g. C:\var\www
+  
+  const resolvedPath = local_path && local_path.trim() !== ''
+    ? path.resolve(local_path.trim())
+    : (name.trim() === 'TeamSync' ? appRoot : path.join(parentDir, name.trim()));
+
+  if (!fs.existsSync(resolvedPath)) {
+    return res.status(400).json({
+      error: `The repository directory was not found on the server at: "${resolvedPath}". Please ensure the repository is cloned on the server first, or specify the path explicitly in Advanced Settings.`
+    });
   }
 
   const crypto = require('crypto');
@@ -505,27 +520,30 @@ app.post('/api/repos', (req, res) => {
 
   const now = new Date().toISOString();
   db.run(`
-    INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, branch_strategy, created_at, organization_id, share_code)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `, [name.trim(), description || '', github_repo || null, allow_sandbox_deploy ? 1 : 0, branch_strategy || 'main-only', now, req.orgId || 1, shareCode], async function(err) {
+    INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, branch_strategy, created_at, organization_id, share_code, local_path)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [name.trim(), description || '', github_repo || null, allow_sandbox_deploy ? 1 : 0, branch_strategy || 'main-only', now, req.orgId || 1, shareCode, resolvedPath], async function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
     
     const dbId = this.lastID;
 
+    // Update in-memory paths cache
+    githubService.repoPathsCache.set(name.trim(), resolvedPath);
+
     // Publish registration event
     eventBus.publish({
       event_type: 'project:registered',
       event_category: 'project',
       repo_name: name,
-      metadata: { description, github_repo, allow_sandbox_deploy, branch_strategy, share_code: shareCode }
+      metadata: { description, github_repo, allow_sandbox_deploy, branch_strategy, share_code: shareCode, local_path: resolvedPath }
     });
 
     try {
       console.log(`[Server] Initializing Git/GitHub workspace repository for project: ${name}`);
       await githubService.initializeRepository(name.trim(), github_repo, description, branch_strategy || 'main-only');
-      res.status(201).json({ id: dbId, name, description, github_repo, created_at: now, share_code: shareCode });
+      res.status(201).json({ id: dbId, name, description, github_repo, created_at: now, share_code: shareCode, local_path: resolvedPath });
     } catch (gitErr) {
       console.error(`[Server] Git/GitHub initialization failed for repository ${name}:`, gitErr.message);
       res.status(201).json({ 
@@ -535,6 +553,7 @@ app.post('/api/repos', (req, res) => {
         github_repo, 
         created_at: now,
         share_code: shareCode,
+        local_path: resolvedPath,
         warning: `Project registered in DB, but Git/GitHub setup failed: ${gitErr.message}`
       });
     }
@@ -2680,7 +2699,17 @@ app.get('*', (req, res) => {
   });
 });
 
-// Start Express + WebSocket Server
-server.listen(PORT, () => {
-  console.log(`[Server] TeamSync API + WebSocket running on http://localhost:${PORT}`);
-});
+// Start Express + WebSocket Server after database cache is loaded
+(async () => {
+  try {
+    await githubService.loadRepoPathsCache();
+    console.log('[Server] Successfully loaded repository paths cache.');
+  } catch (cacheErr) {
+    console.error('[Server] CRITICAL: Failed to load repository paths cache on startup:', cacheErr.message);
+    process.exit(1);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`[Server] TeamSync API + WebSocket running on http://localhost:${PORT}`);
+  });
+})();

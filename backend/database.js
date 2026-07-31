@@ -238,6 +238,24 @@ function initializeSchema() {
       db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_share_code ON repositories(share_code)");
     }
 
+    // Add local_path to repositories
+    db.run("ALTER TABLE repositories ADD COLUMN local_path TEXT", (err) => {
+      // Backfill any repositories missing a local_path
+      db.all("SELECT id, name FROM repositories WHERE local_path IS NULL", [], (selectErr, rows) => {
+        if (!selectErr && rows && rows.length > 0) {
+          const path = require('path');
+          const appRoot = path.resolve(__dirname, '../../'); // e.g. d:\Tech-Finity\TeamDash or C:\var\www\teamsync
+          const parentDir = path.resolve(__dirname, '../../../');
+          
+          rows.forEach(row => {
+            const resolvedPath = row.name === 'TeamSync' ? appRoot : path.join(parentDir, row.name);
+            console.log(`[Database] Backfilling local_path for repository ${row.name}: ${resolvedPath}`);
+            db.run("UPDATE repositories SET local_path = ? WHERE id = ?", [resolvedPath, row.id]);
+          });
+        }
+      });
+    });
+
     // Create Users table
     db.run(`
       CREATE TABLE IF NOT EXISTS users (
