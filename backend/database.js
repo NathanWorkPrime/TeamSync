@@ -8,6 +8,10 @@ const dbPath = path.resolve(__dirname, process.env.DATABASE_FILE || 'teamsync.db
 const usePostgres = !!process.env.DATABASE_URL;
 
 let db;
+let resolveDbReady;
+const dbReady = new Promise((resolve) => {
+  resolveDbReady = resolve;
+});
 
 if (usePostgres) {
   const pool = new Pool({
@@ -244,8 +248,8 @@ function initializeSchema() {
       db.all("SELECT id, name FROM repositories WHERE local_path IS NULL", [], (selectErr, rows) => {
         if (!selectErr && rows && rows.length > 0) {
           const path = require('path');
-          const appRoot = path.resolve(__dirname, '../../'); // e.g. d:\Tech-Finity\TeamDash or C:\var\www\teamsync
-          const parentDir = path.resolve(__dirname, '../../../');
+          const appRoot = path.resolve(__dirname, '../'); // resolves to the app root (e.g. d:\Tech-Finity\TeamDash)
+          const parentDir = path.resolve(__dirname, '../../'); // resolves to parent directory (e.g. d:\Tech-Finity)
           
           rows.forEach(row => {
             const resolvedPath = row.name === 'TeamSync' ? appRoot : path.join(parentDir, row.name);
@@ -530,8 +534,13 @@ function initializeSchema() {
         stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
         stmt.finalize();
       }
+      // Resolve schema initialization promise
+      if (resolveDbReady) {
+        resolveDbReady();
+      }
     });
   });
 }
 
+db.ready = dbReady;
 module.exports = db;

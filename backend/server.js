@@ -2702,6 +2702,11 @@ app.get('*', (req, res) => {
 // Start Express + WebSocket Server after database cache is loaded
 (async () => {
   try {
+    // 1. Wait for database schema connection & migration to finish
+    await db.ready;
+    console.log('[Server] Database schema and migrations are ready.');
+
+    // 2. Load the repository paths cache
     await githubService.loadRepoPathsCache();
     console.log('[Server] Successfully loaded repository paths cache.');
   } catch (cacheErr) {
