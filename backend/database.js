@@ -211,6 +211,33 @@ function initializeSchema() {
       });
     });
 
+    // Add share_code to repositories (non-unique ALTER to bypass SQLite UNIQUE constraint restriction)
+    db.run("ALTER TABLE repositories ADD COLUMN share_code TEXT", (err) => {
+      // Backfill any repositories missing a share_code
+      db.all("SELECT id, name FROM repositories WHERE share_code IS NULL", [], (selectErr, rows) => {
+        if (!selectErr && rows && rows.length > 0) {
+          const crypto = require('crypto');
+          let completed = 0;
+          rows.forEach(row => {
+            const code = 'TS-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+            console.log(`[Database] Backfilling share code for repository ${row.name}: ${code}`);
+            db.run("UPDATE repositories SET share_code = ? WHERE id = ?", [code, row.id], (updateErr) => {
+              completed++;
+              if (completed === rows.length) {
+                createShareCodeIndex();
+              }
+            });
+          });
+        } else {
+          createShareCodeIndex();
+        }
+      });
+    });
+
+    function createShareCodeIndex() {
+      db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_share_code ON repositories(share_code)");
+    }
+
     // Create Users table
     db.run(`
       CREATE TABLE IF NOT EXISTS users (

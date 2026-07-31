@@ -500,11 +500,14 @@ app.post('/api/repos', (req, res) => {
     return res.status(400).json({ error: 'Repository name is required.' });
   }
 
+  const crypto = require('crypto');
+  const shareCode = 'TS-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+
   const now = new Date().toISOString();
   db.run(`
-    INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, branch_strategy, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `, [name.trim(), description || '', github_repo || null, allow_sandbox_deploy ? 1 : 0, branch_strategy || 'main-only', now], async function(err) {
+    INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, branch_strategy, created_at, organization_id, share_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [name.trim(), description || '', github_repo || null, allow_sandbox_deploy ? 1 : 0, branch_strategy || 'main-only', now, req.orgId || 1, shareCode], async function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -516,13 +519,13 @@ app.post('/api/repos', (req, res) => {
       event_type: 'project:registered',
       event_category: 'project',
       repo_name: name,
-      metadata: { description, github_repo, allow_sandbox_deploy, branch_strategy }
+      metadata: { description, github_repo, allow_sandbox_deploy, branch_strategy, share_code: shareCode }
     });
 
     try {
       console.log(`[Server] Initializing Git/GitHub workspace repository for project: ${name}`);
       await githubService.initializeRepository(name.trim(), github_repo, description, branch_strategy || 'main-only');
-      res.status(201).json({ id: dbId, name, description, github_repo, created_at: now });
+      res.status(201).json({ id: dbId, name, description, github_repo, created_at: now, share_code: shareCode });
     } catch (gitErr) {
       console.error(`[Server] Git/GitHub initialization failed for repository ${name}:`, gitErr.message);
       res.status(201).json({ 
@@ -531,9 +534,63 @@ app.post('/api/repos', (req, res) => {
         description, 
         github_repo, 
         created_at: now,
+        share_code: shareCode,
         warning: `Project registered in DB, but Git/GitHub setup failed: ${gitErr.message}`
       });
     }
+  });
+});
+
+// POST /api/repos/join - Join an existing project using share code
+app.post('/api/repos/join', (req, res) => {
+  const { share_code } = req.body;
+  const username = req.headers['x-user-username'] || req.query.username;
+
+  if (!share_code) {
+    return res.status(400).json({ error: 'Share code is required.' });
+  }
+  if (!username) {
+    return res.status(401).json({ error: 'User context is required.' });
+  }
+
+  const lookupCode = share_code.trim().toUpperCase();
+
+  // 1. Look up repository by share_code
+  db.get("SELECT * FROM repositories WHERE share_code = ?", [lookupCode], (err, repo) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!repo) {
+      return res.status(404).json({ error: 'Invalid share code. Repository not found.' });
+    }
+
+    // 2. Look up the requesting user
+    db.get("SELECT * FROM users WHERE username = ?", [username], (userErr, user) => {
+      if (userErr) {
+        return res.status(500).json({ error: userErr.message });
+      }
+      if (!user) {
+        return res.status(404).json({ error: 'User profile not found.' });
+      }
+
+      // 3. Organization isolation checks
+      if (user.organization_id && user.organization_id !== repo.organization_id) {
+        return res.status(403).json({ error: 'Cannot join a project belonging to a different organization.' });
+      }
+
+      // 4. Link the user to the organization if they are not yet associated
+      if (!user.organization_id) {
+        db.run("UPDATE users SET organization_id = ? WHERE id = ?", [repo.organization_id, user.id], (updateErr) => {
+          if (updateErr) {
+            return res.status(500).json({ error: updateErr.message });
+          }
+          return res.json({ success: true, repository: repo, message: 'Successfully joined project and organization.' });
+        });
+      } else {
+        // User already in the same organization
+        return res.json({ success: true, repository: repo, message: 'Successfully verified repository access.' });
+      }
+    });
   });
 });
 

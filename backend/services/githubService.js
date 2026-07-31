@@ -466,7 +466,9 @@ async function getRepos() {
       riders,
       lastDeployment,
       ticketCount: openTasksCount,
-      activeSessions: activeSessionsList
+      activeSessions: activeSessionsList,
+      organization_id: repo.organization_id,
+      share_code: repo.share_code
     };
   }));
 }
@@ -1599,6 +1601,7 @@ async function updateBranchProtection(repoName, branchName, settings) {
 module.exports = {
   isGitHubConfigured,
   getRepos,
+  getRepoPath,
   getBranches,
   getCommits,
   syncGitHubIssues,
