@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sun, Moon } from 'lucide-react';
+import { Sun, Moon, Settings } from 'lucide-react';
 
 export default function Topbar({ activeView, onViewChange, currentUser, theme, onThemeToggle }) {
   return (
@@ -10,6 +10,27 @@ export default function Topbar({ activeView, onViewChange, currentUser, theme, o
       </div>
 
       <div className="who" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <button
+          onClick={() => onViewChange('global-settings')}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: activeView === 'global-settings' ? 'var(--teal)' : 'var(--text-dim)',
+            cursor: 'pointer',
+            padding: '6px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 0.15s ease',
+            marginRight: '4px'
+          }}
+          className="global-settings-btn"
+          title="Global Application Settings"
+        >
+          <Settings size={15} />
+        </button>
+
         <button
           onClick={onThemeToggle}
           style={{

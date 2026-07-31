@@ -228,11 +228,224 @@ app.post('/api/events', (req, res) => {
   res.status(202).json({ message: 'Event received and processing.' });
 });
 
-// GET /api/repos - List company repos
+// In-memory collaborator access cache
+// Key: username:github_repo
+// Value: { hasAccess: boolean, expiresAt: number }
+const collaboratorCache = new Map();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes Cache TTL
+
+async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
+  const cacheKey = `${username}:${githubRepo}`;
+  const now = Date.now();
+  
+  if (collaboratorCache.has(cacheKey)) {
+    const cached = collaboratorCache.get(cacheKey);
+    if (cached.expiresAt > now) {
+      return cached.hasAccess;
+    }
+  }
+  
+  let hasAccess = false;
+  try {
+    const token = userToken || process.env.GITHUB_PAT;
+    if (!token) {
+      return false;
+    }
+    
+    // Check if the user is a collaborator on the repository
+    const response = await fetch(`https://api.github.com/repos/${githubRepo}/collaborators/${username}`, {
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'TeamSync-App'
+      }
+    });
+    
+    if (response.status === 204) {
+      hasAccess = true;
+    }
+  } catch (err) {
+    console.error(`[CollaboratorCheck] Error checking access for ${username} on ${githubRepo}:`, err.message);
+    hasAccess = false;
+  }
+  
+  collaboratorCache.set(cacheKey, {
+    hasAccess,
+    expiresAt: now + CACHE_TTL_MS
+  });
+  
+  return hasAccess;
+}
+
+function isGitHubOAuthConfigured() {
+  return {
+    configured: !!(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET)
+  };
+}
+
+// GET /api/auth/config - Retrieve authentication features status
+app.get('/api/auth/config', (req, res) => {
+  res.json({
+    githubOAuthEnabled: isGitHubOAuthConfigured().configured
+  });
+});
+
+// GET /api/auth/github - Redirect to GitHub OAuth authorize screen
+app.get('/api/auth/github', (req, res) => {
+  const origin = req.query.origin || req.headers.referer || 'http://localhost:5173';
+  const clientStatus = isGitHubOAuthConfigured();
+  
+  if (!clientStatus.configured) {
+    console.log('[OAuth] GITHUB_CLIENT_ID/SECRET not configured. Redirecting with Mock Developer Bypass.');
+    // Redirect directly back to frontend with the default mock user 'you'
+    return res.redirect(`${origin}/?username=you`);
+  }
+  
+  const callbackUrl = process.env.GITHUB_CALLBACK_URL || `${req.protocol}://${req.headers.host}/api/auth/github/callback`;
+  const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(callbackUrl)}&scope=repo,user&state=${encodeURIComponent(origin)}`;
+  
+  res.redirect(githubAuthUrl);
+});
+
+// GET /api/auth/github/callback - Handle OAuth redirect and code exchange
+app.get('/api/auth/github/callback', async (req, res) => {
+  const { code, state: origin } = req.query;
+  const redirectOrigin = origin || 'http://localhost:5173';
+  
+  if (!code) {
+    return res.redirect(`${redirectOrigin}/?error=no_code_provided`);
+  }
+  
+  try {
+    const callbackUrl = process.env.GITHUB_CALLBACK_URL || `${req.protocol}://${req.headers.host}/api/auth/github/callback`;
+    
+    // Exchange OAuth code for an access token
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_CLIENT_ID,
+        client_secret: process.env.GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: callbackUrl
+      })
+    });
+    
+    const tokenData = await tokenResponse.json();
+    if (!tokenData.access_token) {
+      console.error('[OAuth] Failed to retrieve access token:', tokenData);
+      return res.redirect(`${redirectOrigin}/?error=token_exchange_failed`);
+    }
+    
+    const accessToken = tokenData.access_token;
+    
+    // Fetch user profile from GitHub API
+    const userResponse = await fetch('https://api.github.com/user', {
+      headers: {
+        'Authorization': `token ${accessToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'TeamSync-App'
+      }
+    });
+    
+    const profile = await userResponse.json();
+    if (!profile.login) {
+      console.error('[OAuth] Failed to retrieve user profile:', profile);
+      return res.redirect(`${redirectOrigin}/?error=profile_fetch_failed`);
+    }
+    
+    const encryption = require('./services/encryption');
+    const encryptedToken = encryption.encrypt(accessToken);
+    
+    const githubId = profile.id.toString();
+    const username = profile.login.toLowerCase();
+    const displayName = profile.name || profile.login;
+    const email = profile.email || null;
+    const avatarColor = 'var(--teal)'; // Unique color for GitHub OAuth accounts
+    
+    db.get('SELECT * FROM users WHERE github_id = ? OR username = ?', [githubId, username], (err, existingUser) => {
+      if (existingUser) {
+        db.run(
+          'UPDATE users SET github_id = ?, github_token = ?, email = ? WHERE id = ?',
+          [githubId, encryptedToken, email || existingUser.email, existingUser.id],
+          (updateErr) => {
+            if (updateErr) console.error('[OAuth] Database update error:', updateErr.message);
+            res.redirect(`${redirectOrigin}/?username=${username}`);
+          }
+        );
+      } else {
+        db.run(
+          'INSERT INTO users (username, display_name, email, avatar_color, github_id, github_token) VALUES (?, ?, ?, ?, ?, ?)',
+          [username, displayName, email, avatarColor, githubId, encryptedToken],
+          function(insertErr) {
+            if (insertErr) {
+              console.error('[OAuth] Database insert error:', insertErr.message);
+              return res.redirect(`${redirectOrigin}/?error=db_insert_failed`);
+            }
+            // Publish onboarding event
+            eventBus.publish({
+              event_type: 'developer:onboarded',
+              event_category: 'developer',
+              user_id: this.lastID,
+              metadata: { username, display_name: displayName, email, source: 'github_oauth' }
+            });
+            res.redirect(`${redirectOrigin}/?username=${username}`);
+          }
+        );
+      }
+    });
+  } catch (err) {
+    console.error('[OAuth] Callback error:', err.message);
+    res.redirect(`${redirectOrigin}/?error=internal_auth_error`);
+  }
+});
+
+// GET /api/repos - List company repos, filtered by collaborator status
 app.get('/api/repos', async (req, res) => {
   try {
+    const username = req.headers['x-user-username'] || req.query.username;
     const repos = await githubService.getRepos();
-    res.json(repos);
+    
+    if (!username) {
+      return res.json(repos);
+    }
+    
+    db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
+      if (err || !user) {
+        return res.json(repos); // Fallback to all if user not found in DB
+      }
+      
+      // Local fallback users see everything
+      if (!user.github_token) {
+        return res.json(repos);
+      }
+      
+      const encryption = require('./services/encryption');
+      const decryptedToken = encryption.decrypt(user.github_token);
+      
+      if (!decryptedToken) {
+        return res.json(repos);
+      }
+      
+      // Filter repos by collaborator access on GitHub
+      const filteredRepos = [];
+      for (const repo of repos) {
+        if (!repo.github_repo) {
+          filteredRepos.push(repo); // Local-only repos visible to everyone
+          continue;
+        }
+        
+        const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
+        if (hasAccess) {
+          filteredRepos.push(repo);
+        }
+      }
+      
+      res.json(filteredRepos);
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -190,11 +190,15 @@ function initializeSchema() {
         avatar_color TEXT
       )
     `, (err) => {
-      if (!err) {
         db.run("ALTER TABLE users ADD COLUMN email TEXT", (alterErr) => {
           // Ignore if column already exists
         });
-      }
+        db.run("ALTER TABLE users ADD COLUMN github_id TEXT", (alterErr) => {
+          // Ignore if column already exists
+        });
+        db.run("ALTER TABLE users ADD COLUMN github_token TEXT", (alterErr) => {
+          // Ignore if column already exists
+        });
     });
 
     // Create Tickets table

@@ -6,6 +6,7 @@ import Projects from './pages/Projects';
 import RepoView from './pages/RepoView';
 import Session from './pages/Session';
 import Integrations from './pages/Integrations';
+import GlobalSettings from './pages/GlobalSettings';
 import { io } from 'socket.io-client';
 
 const socket = io(import.meta.env.VITE_API_URL || window.location.origin, { autoConnect: false });
@@ -57,7 +58,16 @@ export default function App() {
   // Fetch company repositories
   const fetchRepos = async () => {
     try {
-      const res = await fetch('/api/repos');
+      const headers = {};
+      const cached = localStorage.getItem('teamsync_current_user');
+      let activeUser = currentUser;
+      if (!activeUser && cached) {
+        try { activeUser = JSON.parse(cached); } catch (e) {}
+      }
+      if (activeUser) {
+        headers['X-User-Username'] = activeUser.username;
+      }
+      const res = await fetch('/api/repos', { headers });
       if (res.ok) {
         const data = await res.json();
         setRepos(data);
@@ -137,26 +147,45 @@ export default function App() {
   useEffect(() => {
     fetchUsers();
     
-    // Auto-login from local storage if profile cached
-    const cached = localStorage.getItem('teamsync_current_user');
-    if (cached) {
-      try {
-        const user = JSON.parse(cached);
-        setCurrentUser(user);
-        setActiveView('projects');
-        
-        // Push user credentials to companion extension on load
-        fetch('http://localhost:37845/configure', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_id: user.id,
-            username: user.username,
-            server_url: window.location.origin
-          })
-        }).catch(() => {});
-      } catch (e) {
-        console.warn('[App] Failed to parse cached user:', e);
+    // Handle GitHub OAuth callback redirect
+    const urlParams = new URLSearchParams(window.location.search);
+    const oauthUsername = urlParams.get('username');
+    if (oauthUsername) {
+      // Clear URL parameters
+      window.history.replaceState({}, document.title, window.location.pathname);
+      
+      // Fetch users list to find the matching user profile
+      fetch('/api/users')
+        .then(res => res.json())
+        .then(usersList => {
+          const matchedUser = usersList.find(u => u.username === oauthUsername.toLowerCase().trim());
+          if (matchedUser) {
+            handleLogin(matchedUser);
+          }
+        })
+        .catch(err => console.error('[App] OAuth user retrieval failed:', err));
+    } else {
+      // Auto-login from local storage if profile cached
+      const cached = localStorage.getItem('teamsync_current_user');
+      if (cached) {
+        try {
+          const user = JSON.parse(cached);
+          setCurrentUser(user);
+          setActiveView('projects');
+          
+          // Push user credentials to companion extension on load
+          fetch('http://localhost:37845/configure', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user_id: user.id,
+              username: user.username,
+              server_url: window.location.origin
+            })
+          }).catch(() => {});
+        } catch (e) {
+          console.warn('[App] Failed to parse cached user:', e);
+        }
       }
     }
   }, []);
@@ -771,6 +800,14 @@ export default function App() {
           <Integrations 
             integrations={integrations} 
             onRegisterIntegration={handleRegisterIntegration}
+          />
+        );
+      case 'global-settings':
+        return (
+          <GlobalSettings 
+            users={users}
+            onAddUser={handleAddUser}
+            onRemoveUser={handleRemoveUser}
           />
         );
       default:
