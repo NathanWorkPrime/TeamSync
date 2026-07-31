@@ -45,7 +45,9 @@ export default function RepoView({
   socket,
   integrations,
   onRegisterIntegration,
-  onLeaveSession
+  onLeaveSession,
+  onAddUser,
+  onRemoveUser
 }) {
   const [localSubTab, setLocalSubTab] = useState('sessions');
   const subTab = propsSubTab !== undefined ? propsSubTab : localSubTab;
@@ -61,6 +63,42 @@ export default function RepoView({
   const [newTaskDescription, setNewTaskDescription] = useState('');
   const [newTaskPriority, setNewTaskPriority] = useState('medium');
   const [newTaskAssignee, setNewTaskAssignee] = useState('');
+
+  // User Management State
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserDisplayName, setNewUserDisplayName] = useState('');
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserColor, setNewUserColor] = useState('var(--violet)');
+
+  const handleCreateUserSubmit = (e) => {
+    e.preventDefault();
+    if (!newUserName.trim() || !newUserDisplayName.trim()) return;
+
+    if (onAddUser) {
+      onAddUser({
+        username: newUserName.trim().toLowerCase(),
+        display_name: newUserDisplayName.trim(),
+        email: newUserEmail.trim() || null,
+        avatar_color: newUserColor
+      });
+    }
+
+    setNewUserName('');
+    setNewUserDisplayName('');
+    setNewUserEmail('');
+    setNewUserColor('var(--violet)');
+    setShowAddUserModal(false);
+  };
+
+  const handleDeleteUser = (userId, displayName) => {
+    if (confirm(`Are you sure you want to remove user "${displayName}"?`)) {
+      if (onRemoveUser) {
+        onRemoveUser(userId);
+      }
+    }
+  };
+
   
   // Deployments state
   const [deployments, setDeployments] = useState([]);
@@ -1555,12 +1593,86 @@ export default function RepoView({
 
           {/* SETTINGS SUBVIEW */}
           {subTab === 'settings' && (
-            <div className="subview active">
+            <div className="subview active" style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
               <Integrations 
                 integrations={integrations} 
                 onRegisterIntegration={onRegisterIntegration}
                 embedded={true}
               />
+
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: '32px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                  <div>
+                    <h2 className="display" style={{ fontSize: '18px', fontWeight: 600, margin: 0 }}>
+                      User Management
+                    </h2>
+                    <p style={{ color: 'var(--text-dim)', fontSize: '12.5px', marginTop: '4px', margin: 0 }}>
+                      Manage team members and developers for internal workspace presence and collaboration.
+                    </p>
+                  </div>
+                  <button 
+                    className="btn-primary" 
+                    onClick={() => setShowAddUserModal(true)}
+                  >
+                    + Add User Profile
+                  </button>
+                </div>
+
+                <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+                        <th style={{ padding: '12px 16px', color: 'var(--text-dim)' }}>Name</th>
+                        <th style={{ padding: '12px 16px', color: 'var(--text-dim)' }}>Username</th>
+                        <th style={{ padding: '12px 16px', color: 'var(--text-dim)' }}>Email</th>
+                        <th style={{ padding: '12px 16px', color: 'var(--text-dim)', textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.length === 0 ? (
+                        <tr>
+                          <td colSpan="4" style={{ padding: '24px', textAlign: 'center', color: 'var(--text-dim)' }}>
+                            No users configured.
+                          </td>
+                        </tr>
+                      ) : (
+                        users.map((u) => (
+                          <tr key={u.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '12px 16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <div style={{ 
+                                width: '24px', 
+                                height: '24px', 
+                                borderRadius: '50%', 
+                                backgroundColor: u.avatar_color || 'var(--violet)',
+                                color: 'rgba(15, 23, 42, 0.85)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '11px',
+                                fontWeight: 700
+                              }}>
+                                {u.display_name ? u.display_name.split(' ').map(n => n[0]).join('').toUpperCase() : '??'}
+                              </div>
+                              {u.display_name}
+                            </td>
+                            <td style={{ padding: '12px 16px', fontFamily: 'JetBrains Mono', color: 'var(--teal)' }}>{u.username}</td>
+                            <td style={{ padding: '12px 16px', color: 'var(--text-dim)' }}>{u.email || '—'}</td>
+                            <td style={{ padding: '12px 16px', textAlign: 'right' }}>
+                              <button 
+                                className="btn-secondary" 
+                                style={{ padding: '4px 8px', fontSize: '11.5px', color: 'var(--red)', borderColor: 'var(--red)' }}
+                                onClick={() => handleDeleteUser(u.id, u.display_name)}
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -2055,6 +2167,80 @@ export default function RepoView({
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add User Modal */}
+      {showAddUserModal && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-title">Add User Profile</div>
+            <form onSubmit={handleCreateUserSubmit}>
+              <div className="form-group">
+                <label>Display Name</label>
+                <input 
+                  type="text" 
+                  className="form-control" 
+                  value={newUserDisplayName}
+                  onChange={(e) => setNewUserDisplayName(e.target.value)}
+                  placeholder="e.g. Jane Doe"
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Username</label>
+                <input 
+                  type="text" 
+                  className="form-control" 
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                  placeholder="e.g. jane"
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Email Address</label>
+                <input 
+                  type="email" 
+                  className="form-control" 
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  placeholder="e.g. jane@company.com"
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Avatar Accent Color</label>
+                <select 
+                  className="form-control" 
+                  value={newUserColor}
+                  onChange={(e) => setNewUserColor(e.target.value)}
+                >
+                  <option value="var(--violet)">Violet</option>
+                  <option value="var(--amber)">Amber</option>
+                  <option value="var(--red)">Red</option>
+                  <option value="var(--teal)">Teal</option>
+                  <option value="var(--blue)">Blue</option>
+                  <option value="var(--green)">Green</option>
+                </select>
+              </div>
+
+              <div className="modal-actions">
+                <button 
+                  type="button" 
+                  className="btn-secondary"
+                  onClick={() => setShowAddUserModal(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">
+                  Create User
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

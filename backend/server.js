@@ -119,6 +119,25 @@ app.post('/api/users', (req, res) => {
   });
 });
 
+// DELETE /api/users/:id - Delete user account
+app.delete('/api/users/:id', (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  db.run('DELETE FROM users WHERE id = ?', [userId], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    // Publish developer offboarded event
+    eventBus.publish({
+      event_type: 'developer:offboarded',
+      event_category: 'developer',
+      user_id: userId,
+      metadata: { deleted: true }
+    });
+    res.json({ success: true, changes: this.changes });
+  });
+});
+
+
 // GET /api/events - Query events with filters
 app.get('/api/events', (req, res) => {
   const { repo_name, branch_name, user_id, session_id, ticket_id, event_category, event_type, start_date, end_date, limit } = req.query;

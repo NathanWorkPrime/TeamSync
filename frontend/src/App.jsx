@@ -655,6 +655,45 @@ export default function App() {
     }
   };
 
+  // Add User profile
+  const handleAddUser = async (userPayload) => {
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userPayload)
+      });
+      if (res.ok) {
+        fetchUsers();
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Failed to add user.');
+      }
+    } catch (err) {
+      console.error('Error adding user:', err);
+      alert(err.message);
+    }
+  };
+
+  // Remove User profile
+  const handleRemoveUser = async (userId) => {
+    try {
+      const res = await fetch(`/api/users/${userId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetchUsers();
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Failed to remove user.');
+      }
+    } catch (err) {
+      console.error('Error removing user:', err);
+      alert(err.message);
+    }
+  };
+
+
   // Logout utility
   const handleLogout = () => {
     localStorage.removeItem('teamsync_current_user');
@@ -712,6 +751,8 @@ export default function App() {
             onAddTicket={handleAddTicket}
             onUpdateTicketStatus={handleUpdateTicketStatus}
             onLeaveSession={handleLeaveSession}
+            onAddUser={handleAddUser}
+            onRemoveUser={handleRemoveUser}
           />
         );
       case 'session':
