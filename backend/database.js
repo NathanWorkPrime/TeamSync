@@ -180,6 +180,37 @@ if (usePostgres) {
 
 function initializeSchema() {
   db.serialize(() => {
+    // Create Organizations table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS organizations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        slug TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        status TEXT DEFAULT 'active'
+      )
+    `, () => {
+      db.get("SELECT COUNT(*) as count FROM organizations", (orgErr, orgRow) => {
+        if (orgRow && orgRow.count === 0) {
+          console.log("[Database] Seeding default Tech-Finity organization...");
+          const now = new Date().toISOString();
+          db.run(
+            "INSERT INTO organizations (id, name, slug, created_at) VALUES (1, 'Tech-Finity', 'tech-finity', ?)",
+            [now]
+          );
+        }
+      });
+    });
+
+    // Migrate existing tables to support multi-tenancy Phase 1
+    const tablesToMigrate = ['users', 'repositories', 'tickets', 'session_rooms', 'deployments', 'chat_messages', 'events'];
+    tablesToMigrate.forEach(tableName => {
+      db.run(`ALTER TABLE ${tableName} ADD COLUMN organization_id INTEGER DEFAULT 1`, (err) => {
+        // Run update to catch any rows created with NULL values
+        db.run(`UPDATE ${tableName} SET organization_id = 1 WHERE organization_id IS NULL`);
+      });
+    });
+
     // Create Users table
     db.run(`
       CREATE TABLE IF NOT EXISTS users (

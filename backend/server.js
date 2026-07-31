@@ -19,9 +19,32 @@ const io = new Server(server, {
   }
 });
 eventBus.setSocketIO(io);
-
 app.use(cors());
 app.use(express.json());
+
+// Multi-Tenancy Tenant Scoping Middleware (Phase 1)
+app.use((req, res, next) => {
+  let orgId = 1; // Default to Tech-Finity (ID: 1)
+  
+  const tenantHeader = req.headers['x-tenant-id'];
+  if (tenantHeader) {
+    const parsed = parseInt(tenantHeader, 10);
+    if (!isNaN(parsed)) {
+      orgId = parsed;
+    }
+  }
+  
+  const tenantQuery = req.query.organization_id;
+  if (tenantQuery) {
+    const parsed = parseInt(tenantQuery, 10);
+    if (!isNaN(parsed)) {
+      orgId = parsed;
+    }
+  }
+
+  req.orgId = orgId;
+  next();
+});
 
 // Periodically sync GitHub issues if configured
 if (githubService.isGitHubConfigured()) {
