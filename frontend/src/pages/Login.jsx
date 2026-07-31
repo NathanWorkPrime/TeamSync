@@ -1,33 +1,33 @@
 import React, { useState, useEffect } from 'react';
 
 export default function Login({ onLogin, users }) {
-  const [username, setUsername] = useState('you');
   const [oauthEnabled, setOauthEnabled] = useState(false);
+  const [allowDevMockLogin, setAllowDevMockLogin] = useState(false);
 
   useEffect(() => {
     fetch('/api/auth/config')
       .then(res => res.json())
       .then(config => {
         setOauthEnabled(config.githubOAuthEnabled);
+        setAllowDevMockLogin(config.allowDevMockLogin);
       })
       .catch(err => console.error('Failed to load auth config:', err));
   }, []);
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!username.trim()) return;
-    
-    // Find matched seed user
-    const matchedUser = users.find(
-      u => u.username === username.toLowerCase().trim()
-    ) || users[0]; // fallback to first user
-    
-    onLogin(matchedUser);
-  };
-
   const handleGithubSignIn = () => {
     const origin = window.location.origin;
     window.location.href = `/api/auth/github?origin=${encodeURIComponent(origin)}`;
+  };
+
+  const handleDevBypass = () => {
+    const fallbackUser = users.find(u => u.username === 'you') || users[0] || {
+      id: 1,
+      username: 'you',
+      display_name: 'Default Developer',
+      email: 'you@company.com',
+      avatar_color: 'var(--violet)'
+    };
+    onLogin(fallbackUser);
   };
 
   return (
@@ -35,7 +35,7 @@ export default function Login({ onLogin, users }) {
       <div className="login-card">
         <div className="login-logo">&gt;_</div>
         <h1 className="login-title display">TeamSync</h1>
-        <p className="login-sub" style={{ marginBottom: '24px' }}>Internal Developer Hub</p>
+        <p className="login-sub" style={{ marginBottom: '32px' }}>Internal Developer Hub</p>
         
         {/* GitHub OAuth Button */}
         <button 
@@ -47,7 +47,7 @@ export default function Login({ onLogin, users }) {
             padding: '12px', 
             borderRadius: '8px', 
             fontWeight: 600, 
-            marginBottom: '20px',
+            marginBottom: allowDevMockLogin ? '20px' : '0px',
             backgroundColor: '#24292e',
             borderColor: '#24292e',
             color: '#ffffff',
@@ -67,34 +67,25 @@ export default function Login({ onLogin, users }) {
           Sign in with GitHub
         </button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', color: 'var(--text-dim)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-          <div style={{ flexGrow: 1, height: '1px', background: 'var(--border)' }}></div>
-          <span>Or Select Fallback Profile</span>
-          <div style={{ flexGrow: 1, height: '1px', background: 'var(--border)' }}></div>
-        </div>
+        {/* Developer Sandbox Bypass Option */}
+        {allowDevMockLogin && (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', color: 'var(--text-dim)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              <div style={{ flexGrow: 1, height: '1px', background: 'var(--border)' }}></div>
+              <span>Developer Bypass</span>
+              <div style={{ flexGrow: 1, height: '1px', background: 'var(--border)' }}></div>
+            </div>
 
-        <form onSubmit={handleSubmit}>
-          <div className="form-group" style={{ textAlign: 'left' }}>
-            <select 
-              className="form-control"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              style={{ padding: '12px', fontSize: '14px' }}
+            <button 
+              type="button" 
+              onClick={handleDevBypass}
+              className="btn-secondary" 
+              style={{ width: '100%', padding: '12px', borderRadius: '8px', fontWeight: 600, borderColor: 'var(--amber)', color: 'var(--amber)' }}
             >
-              {users.map(u => (
-                <option key={u.id} value={u.username}>{u.display_name} ({u.username})</option>
-              ))}
-            </select>
-          </div>
-          
-          <button 
-            type="submit" 
-            className="btn-primary" 
-            style={{ width: '100%', padding: '12px', borderRadius: '8px', fontWeight: 600, marginTop: '10px' }}
-          >
-            Enter Dashboard
-          </button>
-        </form>
+              Developer Bypass (Sandbox Mode)
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

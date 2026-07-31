@@ -806,8 +806,8 @@ export default function App() {
         return (
           <GlobalSettings 
             users={users}
-            onAddUser={handleAddUser}
             onRemoveUser={handleRemoveUser}
+            onViewChange={handleViewChange}
           />
         );
       default:

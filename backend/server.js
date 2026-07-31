@@ -286,7 +286,8 @@ function isGitHubOAuthConfigured() {
 // GET /api/auth/config - Retrieve authentication features status
 app.get('/api/auth/config', (req, res) => {
   res.json({
-    githubOAuthEnabled: isGitHubOAuthConfigured().configured
+    githubOAuthEnabled: isGitHubOAuthConfigured().configured,
+    allowDevMockLogin: process.env.ALLOW_DEV_MOCK_LOGIN === 'true'
   });
 });
 
@@ -296,9 +297,13 @@ app.get('/api/auth/github', (req, res) => {
   const clientStatus = isGitHubOAuthConfigured();
   
   if (!clientStatus.configured) {
-    console.log('[OAuth] GITHUB_CLIENT_ID/SECRET not configured. Redirecting with Mock Developer Bypass.');
-    // Redirect directly back to frontend with the default mock user 'you'
-    return res.redirect(`${origin}/?username=you`);
+    if (process.env.ALLOW_DEV_MOCK_LOGIN === 'true') {
+      console.log('[OAuth] GITHUB_CLIENT_ID/SECRET not configured. Redirecting with Developer Bypass (Sandbox Mode).');
+      return res.redirect(`${origin}/?username=you`);
+    } else {
+      console.error('[OAuth] GitHub OAuth is not configured and Developer Bypass is disabled.');
+      return res.redirect(`${origin}/?error=oauth_not_configured`);
+    }
   }
   
   const callbackUrl = process.env.GITHUB_CALLBACK_URL || `${req.protocol}://${req.headers.host}/api/auth/github/callback`;
