@@ -34,6 +34,36 @@ if (githubService.isGitHubConfigured()) {
   console.log('[Server] No GitHub credentials detected. Running in Demo Mode.');
 }
 
+// Clean up stale presence telemetry (no heartbeat/activity in last 15 seconds)
+setInterval(() => {
+  const cutoff = new Date(Date.now() - 15000).toISOString();
+  db.all(`
+    SELECT user_id, repo_name, branch_name 
+    FROM presence 
+    WHERE COALESCE(last_heartbeat, started_at) < ?
+  `, [cutoff], (err, rows) => {
+    if (!err && rows && rows.length > 0) {
+      rows.forEach(row => {
+        db.run("DELETE FROM presence WHERE user_id = ?", [row.user_id], (deleteErr) => {
+          if (!deleteErr) {
+            console.log(`[Presence] Cleared stale presence for user ${row.user_id} due to inactivity`);
+            broadcastPresence();
+            
+            eventBus.publish({
+              event_type: 'presence:ended',
+              event_category: 'session',
+              user_id: row.user_id,
+              repo_name: row.repo_name,
+              branch_name: row.branch_name,
+              metadata: { disconnect_reason: 'inactivity_timeout' }
+            });
+          }
+        });
+      });
+    }
+  });
+}, 5000);
+
 // ==========================================
 // REST API Endpoints
 // ==========================================
@@ -191,29 +221,45 @@ app.get('/api/repos', async (req, res) => {
 
 // POST /api/repos - Register a new repository
 app.post('/api/repos', (req, res) => {
-  const { name, description, github_repo } = req.body;
+  const { name, description, github_repo, allow_sandbox_deploy, branch_strategy } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'Repository name is required.' });
   }
 
   const now = new Date().toISOString();
   db.run(`
-    INSERT INTO repositories (name, description, github_repo, created_at)
-    VALUES (?, ?, ?, ?)
-  `, [name.trim(), description || '', github_repo || null, now], function(err) {
+    INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, branch_strategy, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `, [name.trim(), description || '', github_repo || null, allow_sandbox_deploy ? 1 : 0, branch_strategy || 'main-only', now], async function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
     
+    const dbId = this.lastID;
+
     // Publish registration event
     eventBus.publish({
       event_type: 'project:registered',
       event_category: 'project',
       repo_name: name,
-      metadata: { description, github_repo }
+      metadata: { description, github_repo, allow_sandbox_deploy, branch_strategy }
     });
 
-    res.status(201).json({ id: this.lastID, name, description, github_repo, created_at: now });
+    try {
+      console.log(`[Server] Initializing Git/GitHub workspace repository for project: ${name}`);
+      await githubService.initializeRepository(name.trim(), github_repo, description, branch_strategy || 'main-only');
+      res.status(201).json({ id: dbId, name, description, github_repo, created_at: now });
+    } catch (gitErr) {
+      console.error(`[Server] Git/GitHub initialization failed for repository ${name}:`, gitErr.message);
+      res.status(201).json({ 
+        id: dbId, 
+        name, 
+        description, 
+        github_repo, 
+        created_at: now,
+        warning: `Project registered in DB, but Git/GitHub setup failed: ${gitErr.message}`
+      });
+    }
   });
 });
 
@@ -253,6 +299,23 @@ app.get('/api/repos/:repo/branches', async (req, res) => {
   }
 });
 
+// GET /api/repos/:repo/compare - Compare base and head branches
+app.get('/api/repos/:repo/compare', async (req, res) => {
+  const repoName = req.params.repo;
+  const { base, head } = req.query;
+
+  if (!base || !head) {
+    return res.status(400).json({ error: 'Base and head branches are required.' });
+  }
+
+  try {
+    const comparison = await githubService.compareBranches(repoName, base, head);
+    res.json(comparison);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/repos/:repo/overview - Aggregated metrics and timeline for a repository
 app.get('/api/repos/:repo/overview', async (req, res) => {
   const repoName = req.params.repo;
@@ -261,7 +324,10 @@ app.get('/api/repos/:repo/overview', async (req, res) => {
     // 1. Get repo details
     const repoInfo = await new Promise((resolve) => {
       db.get("SELECT * FROM repositories WHERE name = ?", [repoName], (err, row) => {
-        resolve(row || { name: repoName, description: 'No description provided.' });
+        if (row) {
+          row.allow_sandbox_deploy = row.allow_sandbox_deploy === 1;
+        }
+        resolve(row || { name: repoName, description: 'No description provided.', allow_sandbox_deploy: false });
       });
     });
 
@@ -309,7 +375,8 @@ app.get('/api/repos/:repo/overview', async (req, res) => {
       });
     });
 
-    const rawCommits = await githubService.getCommits(repoName);
+    const branchName = req.query.branch;
+    const rawCommits = await githubService.getCommits(repoName, branchName);
     const commits = rawCommits.map(c => {
       const matchedUser = allUsers.find(u => 
         (u.email && c.email && u.email.toLowerCase() === c.email.toLowerCase()) ||
@@ -404,7 +471,11 @@ app.get('/api/repos/:repo/overview', async (req, res) => {
     let status = 'Healthy';
     const factors = [];
 
-    factors.push(`${deploySuccessRate.toFixed(0)}% deployment success rate`);
+    if (totalDeploys > 0) {
+      factors.push(`${deploySuccessRate.toFixed(0)}% deployment success rate`);
+    } else {
+      factors.push('No deployments recorded yet');
+    }
     factors.push(`${openTickets.length} open tickets`);
 
     if (urgentTickets.length > 0) {
@@ -873,14 +944,7 @@ app.get('/api/me/today', (req, res) => {
             time: 'Just now'
           }));
 
-          const mockActivity = [
-            { name: 'David', action: 'merged', target: 'feature/about-page', branch: 'development', time: '1h ago' },
-            { name: 'Sarah', action: 'opened ticket', target: 'Fix nav on mobile', branch: '', time: '2h ago' },
-            { name: 'Tom', action: 'started a session on', target: 'mobile-app', branch: '', time: '3h ago' },
-            { name: 'System', action: 'moved ticket', target: 'Add newsletter signup', branch: 'Review', time: 'Yesterday' }
-          ];
-
-          const activity = [...realDeployments, ...mockActivity].slice(0, 6);
+          const activity = realDeployments;
 
           res.json({
             tickets: tickets || [],
@@ -915,9 +979,9 @@ app.post('/api/presence', (req, res) => {
   const startedAt = new Date().toISOString();
 
   db.run(`
-    INSERT OR REPLACE INTO presence (user_id, repo_name, branch_name, session_link, started_at)
-    VALUES (?, ?, ?, ?, ?)
-  `, [userId, repo_name, branch_name, session_link || '', startedAt], function(err) {
+    INSERT OR REPLACE INTO presence (user_id, repo_name, branch_name, session_link, started_at, last_heartbeat)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `, [userId, repo_name, branch_name, session_link || '', startedAt, startedAt], function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -963,6 +1027,7 @@ app.post('/api/presence/heartbeat', (req, res) => {
     active_file, 
     staged_files, 
     modified_files, 
+    conflicted_files,
     current_ticket, 
     last_activity 
   } = req.body;
@@ -972,11 +1037,12 @@ app.post('/api/presence/heartbeat', (req, res) => {
   db.get("SELECT started_at FROM presence WHERE user_id = ?", [userId], (err, row) => {
     const startedAt = row ? row.started_at : new Date().toISOString();
 
+    const now = new Date().toISOString();
     db.run(`
       INSERT OR REPLACE INTO presence (
         user_id, repo_name, branch_name, session_link, started_at,
-        active_file, staged_files, modified_files, current_ticket, last_activity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        active_file, staged_files, modified_files, conflicted_files, current_ticket, last_activity, last_heartbeat
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       userId,
       repo_name || null,
@@ -986,8 +1052,10 @@ app.post('/api/presence/heartbeat', (req, res) => {
       active_file || null,
       staged_files ? JSON.stringify(staged_files) : null,
       modified_files ? JSON.stringify(modified_files) : null,
+      conflicted_files ? JSON.stringify(conflicted_files) : null,
       current_ticket || null,
-      last_activity || null
+      last_activity || null,
+      now
     ], function(err) {
       if (err) {
         return res.status(500).json({ error: err.message });
@@ -1006,6 +1074,7 @@ app.post('/api/presence/heartbeat', (req, res) => {
           active_file: active_file || null,
           staged_files_count: staged_files ? staged_files.length : 0,
           modified_files_count: modified_files ? modified_files.length : 0,
+          conflicted_files_count: conflicted_files ? conflicted_files.length : 0,
           current_ticket: current_ticket || null,
           last_activity: last_activity || null
         }
@@ -1052,7 +1121,8 @@ app.delete('/api/presence/:user_id', (req, res) => {
       db.get('SELECT COUNT(*) as count FROM presence WHERE repo_name = ? AND branch_name = ?', [repo_name, branch_name], (err, countRow) => {
         if (!err && countRow && countRow.count === 0) {
           // No users left on this branch! Mark the session room as stale.
-          db.run("UPDATE session_rooms SET status = 'stale' WHERE repo_name = ? AND branch_name = ? AND status = 'active'", [repo_name, branch_name], function(err) {
+          const closedAt = new Date().toISOString();
+          db.run("UPDATE session_rooms SET status = 'stale', closed_at = ? WHERE repo_name = ? AND branch_name = ? AND status = 'active'", [closedAt, repo_name, branch_name], function(err) {
             if (!err) {
               console.log(`[Server] Session room for ${repo_name}/${branch_name} marked as stale.`);
               io.emit('activity:new', {
@@ -1128,6 +1198,119 @@ app.post('/api/session-rooms', (req, res) => {
   });
 });
 
+// POST /api/session-rooms/:id/close - Close active session room (host-only)
+app.post('/api/session-rooms/:id/close', (req, res) => {
+  const roomId = req.params.id;
+  const { user_id } = req.body;
+  
+  db.get('SELECT * FROM session_rooms WHERE id = ?', [roomId], (err, room) => {
+    if (err || !room) {
+      return res.status(404).json({ error: 'Session room not found.' });
+    }
+    
+    if (room.created_by_user_id && room.created_by_user_id !== parseInt(user_id, 10)) {
+      return res.status(403).json({ error: 'Only the host can close the session.' });
+    }
+    
+    // Close the room
+    const closedAt = new Date().toISOString();
+    db.run("UPDATE session_rooms SET status = 'stale', closed_at = ? WHERE id = ?", [closedAt, roomId], (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      
+      // Clear presence for all users in this repo and branch
+      db.run("DELETE FROM presence WHERE repo_name = ? AND branch_name = ?", [room.repo_name, room.branch_name], (err) => {
+        if (err) console.error('[Server] Failed to clear presence on close:', err.message);
+        
+        // Add system message
+        const now = new Date().toISOString();
+        db.run(`
+          INSERT INTO chat_messages (repo_name, branch_name, user_id, message, sent_at)
+          VALUES (?, ?, NULL, ?, ?)
+        `, [room.repo_name, room.branch_name, 'The host has ended this collaboration session.', now], (chatErr) => {
+          
+          // Broadcast to socket room
+          io.to(`${room.repo_name}/${room.branch_name}`).emit('room:closed', {
+            repo: room.repo_name,
+            branch: room.branch_name
+          });
+          
+          // Publish presence ended events
+          eventBus.publish({
+            event_type: 'session:ended',
+            event_category: 'session',
+            session_id: room.id,
+            repo_name: room.repo_name,
+            branch_name: room.branch_name,
+            user_id: parseInt(user_id, 10),
+            metadata: { reason: 'host_closed' }
+          });
+          
+          broadcastPresence();
+          res.json({ success: true, message: 'Session closed successfully.' });
+        });
+      });
+    });
+  });
+});
+
+// GET /api/repos/:repo/sessions - Get enriched session rooms history
+app.get('/api/repos/:repo/sessions', async (req, res) => {
+  const repoName = req.params.repo;
+  
+  try {
+    const sessions = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT s.*, u.username as creator_username, u.display_name as creator_display_name, u.avatar_color as creator_avatar_color
+        FROM session_rooms s
+        LEFT JOIN users u ON s.created_by_user_id = u.id
+        WHERE s.repo_name = ?
+        ORDER BY s.id DESC
+      `, [repoName], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    const enrichedSessions = [];
+    for (const session of sessions) {
+      const startTime = session.created_at;
+      const endTime = session.closed_at || new Date().toISOString();
+
+      const changelogs = await new Promise((resolve) => {
+        db.all(`
+          SELECT c.*, u.display_name as author_display_name, u.avatar_color as author_avatar_color
+          FROM changelog_entries c
+          LEFT JOIN users u ON c.author_user_id = u.id
+          WHERE c.repo_name = ? AND c.branch_name = ? AND c.created_at >= ? AND c.created_at <= ?
+        `, [repoName, session.branch_name, startTime, endTime], (err, rows) => {
+          resolve(rows || []);
+        });
+      });
+
+      const deployments = await new Promise((resolve) => {
+        db.all(`
+          SELECT d.*, u.display_name as user_display_name, u.avatar_color as user_avatar_color
+          FROM deployments d
+          LEFT JOIN users u ON d.user_id = u.id
+          WHERE d.repo_name = ? AND d.branch_name = ? AND d.deployed_at >= ? AND d.deployed_at <= ?
+        `, [repoName, session.branch_name, startTime, endTime], (err, rows) => {
+          resolve(rows || []);
+        });
+      });
+
+      enrichedSessions.push({
+        ...session,
+        changelogs,
+        deployments
+      });
+    }
+
+    res.json(enrichedSessions);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/rooms/:repo/:branch/messages - Get chat message history
 app.get('/api/rooms/:repo/:branch/messages', async (req, res) => {
   const { repo, branch } = req.params;
@@ -1152,6 +1335,441 @@ app.get('/api/rooms/:repo/:branch/deployments', (req, res) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
+    res.json(rows || []);
+  });
+});
+
+// GET /api/repos/:repo/deployments - Get global deployments for a repository
+app.get('/api/repos/:repo/deployments', (req, res) => {
+  const repoName = req.params.repo;
+  db.all(`
+    SELECT d.*, u.display_name, u.avatar_color
+    FROM deployments d
+    LEFT JOIN users u ON d.user_id = u.id
+    WHERE d.repo_name = ?
+    ORDER BY d.deployed_at DESC
+  `, [repoName], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows || []);
+  });
+});
+
+// POST /api/repos/:repo/branches - Create a new branch
+app.post('/api/repos/:repo/branches', async (req, res) => {
+  const repoName = req.params.repo;
+  const { branch_name, base_branch } = req.body;
+
+  if (!branch_name) {
+    return res.status(400).json({ error: 'Branch name is required.' });
+  }
+
+  const result = await githubService.createBranch(repoName, branch_name, base_branch || 'development');
+  if (result.success) {
+    // Add event
+    eventBus.publish({
+      event_type: 'git:branch_created',
+      event_category: 'source-control',
+      repo_name: repoName,
+      branch_name: branch_name,
+      metadata: { base_branch: base_branch || 'development', message: result.message }
+    });
+    
+    // Add event to timeline/events table
+    const now = new Date().toISOString();
+    db.run(`
+      INSERT INTO events (event_type, event_category, timestamp, repo_name, branch_name, metadata)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, ['git:branch_created', 'source-control', now, repoName, branch_name, JSON.stringify({ base_branch: base_branch || 'development' })]);
+    
+    res.json({ success: true, message: result.message });
+  } else {
+    res.status(500).json({ error: result.error });
+  }
+});
+
+// GET /api/repos/:repo/deploy/status - Check if port 5001 is listening locally
+app.get('/api/repos/:repo/deploy/status', (req, res) => {
+  const net = require('net');
+  const checkPort = 5001;
+  const client = new net.Socket();
+  
+  client.setTimeout(1000);
+  
+  client.once('connect', () => {
+    client.destroy();
+    res.json({ status: 'online', url: `http://localhost:${checkPort}/` });
+  });
+  
+  client.once('timeout', () => {
+    client.destroy();
+    res.json({ status: 'offline' });
+  });
+  
+  client.once('error', () => {
+    client.destroy();
+    res.json({ status: 'offline' });
+  });
+  
+  client.connect(checkPort, '127.0.0.1');
+});
+
+// POST /api/repos/:repo/deploy - Perform local Node deployment on port 5001
+app.post('/api/repos/:repo/deploy', async (req, res) => {
+  const repoName = req.params.repo;
+  const { branch_name, user_id, commit_hash } = req.body;
+
+  // 1. Kill any existing process on port 5001 in Windows
+  const cp = require('child_process');
+  try {
+    const stdout = cp.execSync('netstat -ano | findstr :5001').toString();
+    const lines = stdout.split('\n');
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && parseInt(pid, 10) > 0) {
+        cp.execSync(`taskkill /PID ${pid} /F`);
+      }
+    }
+  } catch (e) {}
+
+  // 1b. Checkout target commit hash if provided (e.g. for rollbacks)
+  if (commit_hash) {
+    try {
+      console.log(`[Deploy] Performing git checkout to target commit ${commit_hash} for sandbox...`);
+      const checkoutRes = await githubService.executeGitCommand(`git checkout ${commit_hash}`, repoName);
+      if (!checkoutRes.success) {
+        console.error('[Deploy] Git checkout failed:', checkoutRes.error);
+        return res.status(500).json({ error: `Git checkout failed: ${checkoutRes.error}` });
+      }
+    } catch (checkoutErr) {
+      console.error('[Deploy] Git checkout failed:', checkoutErr.message);
+      return res.status(500).json({ error: `Git checkout failed: ${checkoutErr.message}` });
+    }
+  }
+
+  // 2. Spawn a new background child process
+  try {
+    const { spawn } = require('child_process');
+    const path = require('path');
+    
+    const env = { 
+      ...process.env, 
+      PORT: '5001', 
+      DATABASE_FILE: 'teamsync-deploy.db'
+    };
+    
+    // Spawn server.js inside backend directory
+    const child = spawn('node', ['server.js'], {
+      cwd: __dirname,
+      env,
+      detached: true,
+      stdio: 'ignore'
+    });
+    
+    child.unref();
+
+    // 3. Resolve SHAs and generate changelog
+    const resolvedSha = await githubService.resolveCommitSha(repoName, branch_name || 'main', commit_hash || 'HEAD');
+    
+    const prevDeploy = await new Promise((resolve) => {
+      db.get(`
+        SELECT commit_hash FROM deployments 
+        WHERE repo_name = ? AND branch_name = ? AND status = 'success'
+        ORDER BY deployed_at DESC LIMIT 1
+      `, [repoName, branch_name || 'main'], (err, row) => {
+        resolve(row);
+      });
+    });
+    
+    const prevSha = prevDeploy ? prevDeploy.commit_hash : null;
+    const changelog = await githubService.generateChangelog(repoName, prevSha, resolvedSha, branch_name || 'main');
+
+    // 4. Save deployment record in DB
+    const deployedAt = new Date().toISOString();
+    const userVal = user_id || 1; // Default to 'You'
+    const statusVal = 'success';
+    
+    db.run(`
+      INSERT INTO deployments (repo_name, branch_name, user_id, commit_hash, status, deployed_at, changelog)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [repoName, branch_name || 'main', userVal, resolvedSha, statusVal, deployedAt, changelog], function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      const newDeployId = this.lastID;
+      
+      db.get(`
+        SELECT d.*, u.display_name, u.avatar_color
+        FROM deployments d
+        LEFT JOIN users u ON d.user_id = u.id
+        WHERE d.id = ?
+      `, [newDeployId], (err, row) => {
+        // Publish event to event bus
+        eventBus.publish({
+          event_type: 'deploy:success',
+          event_category: 'deployment',
+          deployment_id: newDeployId,
+          user_id: userVal,
+          repo_name: repoName,
+          branch_name: branch_name || 'main',
+          metadata: { commit_hash: resolvedSha, status: statusVal, changelog }
+        });
+        
+        res.json({ success: true, deployment: row || { id: newDeployId } });
+      });
+    });
+
+  } catch (err) {
+    console.error('Failed to spawn deployment process:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/repos/:repo/pulls - Create Pull Request on GitHub
+app.post('/api/repos/:repo/pulls', async (req, res) => {
+  const repoName = req.params.repo;
+  const { sourceBranch, targetBranch, title, body } = req.body;
+  try {
+    const result = await githubService.createPullRequest(repoName, sourceBranch, targetBranch, title, body);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Create PR failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/repos/:repo/pulls/:number - Fetch Pull Request details from GitHub
+app.get('/api/repos/:repo/pulls/:number', async (req, res) => {
+  const repoName = req.params.repo;
+  const prNumber = parseInt(req.params.number, 10);
+  try {
+    const result = await githubService.getPullRequestDetails(repoName, prNumber);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Fetch PR details failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/repos/:repo/pulls/:number/approve - Approve Pull Request (GitHub or Simulated)
+app.post('/api/repos/:repo/pulls/:number/approve', async (req, res) => {
+  const repoName = req.params.repo;
+  const prNumber = parseInt(req.params.number, 10);
+  try {
+    const result = await githubService.approvePullRequest(repoName, prNumber);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Approve PR failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/repos/:repo/pulls/:number/merge - Merge Pull Request on GitHub
+app.post('/api/repos/:repo/pulls/:number/merge', async (req, res) => {
+  const repoName = req.params.repo;
+  const prNumber = parseInt(req.params.number, 10);
+  try {
+    const result = await githubService.mergePullRequest(repoName, prNumber);
+    
+    // Fetch PR details to publish merge success event
+    let prDetails = { head: { ref: 'unknown' }, base: { ref: 'master' } };
+    try {
+      const pat = process.env.GITHUB_PAT;
+      const repoRow = await new Promise((resolve) => {
+        db.get("SELECT * FROM repositories WHERE name = ?", [repoName], (err, row) => resolve(row));
+      });
+      const prRes = await fetch(`https://api.github.com/repos/${repoRow.github_repo}/pulls/${prNumber}`, {
+        headers: {
+          'Authorization': `token ${pat}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'TeamSync-App'
+        }
+      });
+      if (prRes.ok) {
+        prDetails = await prRes.json();
+      }
+    } catch (e) {}
+
+    eventBus.publish({
+      event_type: 'git:merge_success',
+      event_category: 'project',
+      repo_name: repoName,
+      branch_name: prDetails.base.ref || 'master',
+      user_id: 1, // Default user
+      metadata: { 
+        source_branch: prDetails.head.ref || 'unknown', 
+        target_branch: prDetails.base.ref || 'master',
+        pr_number: prNumber
+      }
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Merge PR failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/repos/:repo/branches/:branch/protection - Fetch branch protection settings
+app.get('/api/repos/:repo/branches/:branch/protection', async (req, res) => {
+  const repoName = req.params.repo;
+  const branchName = req.params.branch;
+  try {
+    const result = await githubService.getBranchProtection(repoName, branchName);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Fetch branch protection failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/repos/:repo/branches/:branch/protection - Update branch protection settings
+app.put('/api/repos/:repo/branches/:branch/protection', async (req, res) => {
+  const repoName = req.params.repo;
+  const branchName = req.params.branch;
+  const settings = req.body;
+  try {
+    const result = await githubService.updateBranchProtection(repoName, branchName, settings);
+    res.json(result);
+  } catch (err) {
+    console.error('[Server] Update branch protection failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/repos/:repo/branches/:branch/history - Interleaved merge & deploy history
+app.get('/api/repos/:repo/branches/:branch/history', (req, res) => {
+  const { repo, branch } = req.params;
+  const searchPattern = `%"source_branch":"${branch}"%`;
+  
+  db.all(`
+    SELECT e.*, u.display_name as user_name, u.avatar_color as user_avatar_color
+    FROM events e
+    LEFT JOIN users u ON e.user_id = u.id
+    WHERE e.repo_name = ? 
+      AND (
+        e.branch_name = ? 
+        OR (e.event_type = 'git:merge_success' AND e.metadata LIKE ?)
+      )
+      AND e.event_type IN ('git:merge_success', 'deploy:success', 'deploy:failed')
+    ORDER BY e.timestamp DESC
+  `, [repo, branch, searchPattern], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    const parsedRows = (rows || []).map(r => {
+      let meta = {};
+      try {
+        meta = JSON.parse(r.metadata || '{}');
+      } catch (e) {}
+      return { ...r, metadata: meta };
+    });
+    
+    res.json(parsedRows);
+  });
+});
+
+// GET /api/repos/:repo/branches/:branch/changelog - Combined commits + manual entries
+app.get('/api/repos/:repo/branches/:branch/changelog', (req, res) => {
+  const { repo, branch } = req.params;
+  
+  db.all(`
+    SELECT e.id, 'commit' as type, e.timestamp, u.display_name as author_name, u.avatar_color as author_avatar_color, e.metadata
+    FROM events e
+    LEFT JOIN users u ON e.user_id = u.id
+    WHERE e.repo_name = ? AND e.branch_name = ? AND e.event_type = 'git:commit'
+  `, [repo, branch], (err, commitRows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    db.all(`
+      SELECT c.id, 'manual' as type, c.created_at as timestamp, u.display_name as author_name, u.avatar_color as author_avatar_color, c.content as message
+      FROM changelog_entries c
+      LEFT JOIN users u ON c.author_user_id = u.id
+      WHERE c.repo_name = ? AND c.branch_name = ?
+    `, [repo, branch], (err, manualRows) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      
+      const combined = [];
+      
+      (commitRows || []).forEach(r => {
+        let meta = {};
+        try {
+          meta = JSON.parse(r.metadata || '{}');
+        } catch (e) {}
+        combined.push({
+          id: `commit_${r.id}`,
+          type: 'commit',
+          timestamp: r.timestamp,
+          author: meta.author || r.author_name || 'Developer',
+          avatar_color: r.author_avatar_color || 'var(--teal)',
+          message: meta.message || 'New commit',
+          hash: meta.hash
+        });
+      });
+      
+      (manualRows || []).forEach(r => {
+        combined.push({
+          id: `manual_${r.id}`,
+          type: 'manual',
+          timestamp: r.timestamp,
+          author: r.author_name || 'Developer',
+          avatar_color: r.author_avatar_color || 'var(--violet)',
+          message: r.message
+        });
+      });
+      
+      combined.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      res.json(combined);
+    });
+  });
+});
+
+// POST /api/repos/:repo/branches/:branch/changelog - Post a manual changelog entry
+app.post('/api/repos/:repo/branches/:branch/changelog', (req, res) => {
+  const { repo, branch } = req.params;
+  const { content, author_user_id } = req.body;
+  
+  if (!content) {
+    return res.status(400).json({ error: 'Content is required.' });
+  }
+  
+  const now = new Date().toISOString();
+  db.run(`
+    INSERT INTO changelog_entries (repo_name, branch_name, content, author_user_id, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `, [repo, branch, content, author_user_id || 1, now], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    const entryId = this.lastID;
+    
+    db.get(`
+      SELECT c.id, 'manual' as type, c.created_at as timestamp, u.display_name as author_name, u.avatar_color as author_avatar_color, c.content as message
+      FROM changelog_entries c
+      LEFT JOIN users u ON c.author_user_id = u.id
+      WHERE c.id = ?
+    `, [entryId], (err, row) => {
+      if (row) {
+        eventBus.publish({
+          event_type: 'changelog:created',
+          event_category: 'project',
+          repo_name: repo,
+          branch_name: branch,
+          user_id: author_user_id || 1,
+          metadata: { message: content }
+        });
+      }
+      res.status(201).json(row || { id: entryId });
+    });
   });
 });
 
@@ -1173,18 +1791,38 @@ app.get('/api/deployments', (req, res) => {
 
 
 // POST /api/deployments - Register a new deployment and broadcast it
-app.post('/api/deployments', (req, res) => {
-  const { repo_name, branch_name, user_id, commit_hash, status } = req.body;
+app.post('/api/deployments', async (req, res) => {
+  const { repo_name, branch_name, user_id, commit_hash, status, is_rollback } = req.body;
   if (!repo_name || !branch_name) {
     return res.status(400).json({ error: 'Repository name and branch name are required.' });
   }
 
+  // 1. Resolve SHAs and generate changelog
+  const resolvedSha = await githubService.resolveCommitSha(repo_name, branch_name, commit_hash || 'HEAD');
+  
+  const prevDeploy = await new Promise((resolve) => {
+    db.get(`
+      SELECT commit_hash FROM deployments 
+      WHERE repo_name = ? AND branch_name = ? AND status = 'success'
+      ORDER BY deployed_at DESC LIMIT 1
+    `, [repo_name, branch_name], (err, row) => {
+      resolve(row);
+    });
+  });
+  
+  const prevSha = prevDeploy ? prevDeploy.commit_hash : null;
+  let changelog = await githubService.generateChangelog(repo_name, prevSha, resolvedSha, branch_name);
+  if (is_rollback) {
+    changelog = `### 🔄 Rollback to ${resolvedSha.substring(0, 7)}\n\n*Reverting environment state to prior version.*\n\n---\n\n` + changelog;
+  }
+
+  // 2. Save deployment record in DB
   const deployedAt = new Date().toISOString();
   
   db.run(`
-    INSERT INTO deployments (repo_name, branch_name, user_id, commit_hash, status, deployed_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `, [repo_name, branch_name, user_id || null, commit_hash || null, status || 'success', deployedAt], function(err) {
+    INSERT INTO deployments (repo_name, branch_name, user_id, commit_hash, status, deployed_at, changelog)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [repo_name, branch_name, user_id || null, resolvedSha, status || 'success', deployedAt, changelog], function(err) {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -1210,7 +1848,7 @@ app.post('/api/deployments', (req, res) => {
           user_id: row.user_id,
           repo_name: row.repo_name,
           branch_name: row.branch_name,
-          metadata: { commit_hash: row.commit_hash, status: row.status || 'success', display_name: row.display_name }
+          metadata: { commit_hash: resolvedSha, status: row.status || 'success', changelog }
         });
       }
       res.status(201).json(row || { id: newDeployId });
@@ -1389,91 +2027,202 @@ app.delete('/api/docs/:id', (req, res) => {
   });
 });
 
-// GET /api/repos/:repo/files - Get file tree for a repository (live local scan or mock)
+// GET /api/repos/:repo/tasks - Get tasks for a repository
+app.get('/api/repos/:repo/tasks', (req, res) => {
+  const repoName = req.params.repo;
+  db.all(`
+    SELECT t.*, u.display_name as assignee_name, u.avatar_color as assignee_avatar_color
+    FROM tasks t
+    LEFT JOIN users u ON t.assignee_user_id = u.id
+    WHERE t.repo_name = ?
+    ORDER BY t.id DESC
+  `, [repoName], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(rows || []);
+  });
+});
+
+// POST /api/repos/:repo/tasks - Create a new task
+app.post('/api/repos/:repo/tasks', (req, res) => {
+  const repoName = req.params.repo;
+  const { title, description, status, priority, assignee_user_id } = req.body;
+  if (!title) {
+    return res.status(400).json({ error: 'Task title is required.' });
+  }
+
+  const now = new Date().toISOString();
+  db.run(`
+    INSERT INTO tasks (repo_name, title, description, status, priority, assignee_user_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    repoName,
+    title,
+    description || '',
+    status || 'todo',
+    priority || 'medium',
+    assignee_user_id || null,
+    now,
+    now
+  ], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    const taskId = this.lastID;
+
+    // Publish event
+    eventBus.publish({
+      event_type: 'ticket:created',
+      event_category: 'ticket',
+      repo_name: repoName,
+      metadata: { title, priority, status }
+    });
+
+    db.get(`
+      SELECT t.*, u.display_name as assignee_name, u.avatar_color as assignee_avatar_color
+      FROM tasks t
+      LEFT JOIN users u ON t.assignee_user_id = u.id
+      WHERE t.id = ?
+    `, [taskId], (err, row) => {
+      res.status(201).json(row || { id: taskId });
+    });
+  });
+});
+
+// PATCH /api/tasks/:id - Update an existing task
+app.patch('/api/tasks/:id', (req, res) => {
+  const taskId = req.params.id;
+  const { status, assignee_user_id, priority, description, title } = req.body;
+
+  const updates = [];
+  const params = [];
+
+  if (status !== undefined) {
+    updates.push('status = ?');
+    params.push(status);
+  }
+  if (assignee_user_id !== undefined) {
+    updates.push('assignee_user_id = ?');
+    params.push(assignee_user_id);
+  }
+  if (priority !== undefined) {
+    updates.push('priority = ?');
+    params.push(priority);
+  }
+  if (description !== undefined) {
+    updates.push('description = ?');
+    params.push(description);
+  }
+  if (title !== undefined) {
+    updates.push('title = ?');
+    params.push(title);
+  }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No fields to update.' });
+  }
+
+  const now = new Date().toISOString();
+  updates.push('updated_at = ?');
+  params.push(now);
+
+  params.push(taskId);
+
+  db.run(`
+    UPDATE tasks
+    SET ${updates.join(', ')}
+    WHERE id = ?
+  `, params, function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    db.get(`
+      SELECT t.*, u.display_name as assignee_name, u.avatar_color as assignee_avatar_color
+      FROM tasks t
+      LEFT JOIN users u ON t.assignee_user_id = u.id
+      WHERE t.id = ?
+    `, [taskId], (err, row) => {
+      if (row) {
+        eventBus.publish({
+          event_type: 'ticket:updated',
+          event_category: 'ticket',
+          repo_name: row.repo_name,
+          metadata: { title: row.title, status: row.status }
+        });
+      }
+      res.json(row || { message: 'Task updated successfully' });
+    });
+  });
+});
+
+// DELETE /api/tasks/:id - Delete a task
+app.delete('/api/tasks/:id', (req, res) => {
+  const taskId = req.params.id;
+  db.run('DELETE FROM tasks WHERE id = ?', [taskId], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ success: true, message: 'Task deleted successfully' });
+  });
+});
+
+// GET /api/repos/:repo/files - Get file tree for a repository (live local scan)
 app.get('/api/repos/:repo/files', (req, res) => {
   const repoName = req.params.repo;
   const fs = require('fs');
   const path = require('path');
 
-  if (repoName === 'TeamSync' || repoName === 'TeamDash') {
-    try {
-      const projectRoot = path.resolve(__dirname, '../');
-      
-      const buildFileTree = (dirPath, rootPath) => {
-        const name = path.basename(dirPath);
-        const relPath = path.relative(rootPath, dirPath).replace(/\\/g, '/');
-        
-        const stats = fs.statSync(dirPath);
-        if (!stats.isDirectory()) {
-          return { name, path: relPath, isDir: false };
-        }
-
-        const children = [];
-        const files = fs.readdirSync(dirPath);
-        const ignored = ['node_modules', '.git', '.github', 'dist', 'out', 'build', '.DS_Store', 'teamsync-extension-1.0.0.vsix'];
-
-        for (const f of files) {
-          if (ignored.includes(f)) continue;
-          const childPath = path.join(dirPath, f);
-          try {
-            const childNode = buildFileTree(childPath, rootPath);
-            children.push(childNode);
-          } catch (err) {
-            // ignore inaccessible files
-          }
-        }
-
-        children.sort((a, b) => {
-          if (a.isDir && !b.isDir) return -1;
-          if (!a.isDir && b.isDir) return 1;
-          return a.name.localeCompare(b.name);
-        });
-
-        return {
-          name: name || 'root',
-          path: relPath,
-          isDir: true,
-          children
-        };
-      };
-
-      const tree = buildFileTree(projectRoot, projectRoot);
-      res.json(tree);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
+  try {
+    const projectRoot = githubService.getRepoPath(repoName);
+    
+    if (!fs.existsSync(projectRoot)) {
+      return res.status(404).json({ error: `Local repository folder for '${repoName}' not found or unavailable.` });
     }
-  } else {
-    // Return mock file tree for other repositories
-    const mockTree = {
-      name: repoName,
-      path: '',
-      isDir: true,
-      children: [
-        {
-          name: 'src',
-          path: 'src',
-          isDir: true,
-          children: [
-            { name: 'App.js', path: 'src/App.js', isDir: false },
-            { name: 'index.js', path: 'src/index.js', isDir: false },
-            { name: 'styles.css', path: 'src/styles.css', isDir: false },
-            {
-              name: 'components',
-              path: 'src/components',
-              isDir: true,
-              children: [
-                { name: 'Button.js', path: 'src/components/Button.js', isDir: false },
-                { name: 'contactForm.js', path: 'src/components/contactForm.js', isDir: false },
-                { name: 'Header.js', path: 'src/components/Header.js', isDir: false }
-              ]
-            }
-          ]
-        },
-        { name: 'package.json', path: 'package.json', isDir: false },
-        { name: 'README.md', path: 'README.md', isDir: false }
-      ]
+
+    const buildFileTree = (dirPath, rootPath) => {
+      const name = path.basename(dirPath);
+      const relPath = path.relative(rootPath, dirPath).replace(/\\/g, '/');
+      
+      const stats = fs.statSync(dirPath);
+      if (!stats.isDirectory()) {
+        return { name, path: relPath, isDir: false };
+      }
+
+      const children = [];
+      const files = fs.readdirSync(dirPath);
+      const ignored = ['node_modules', '.git', '.github', 'dist', 'out', 'build', '.DS_Store', 'teamsync-extension-1.0.0.vsix'];
+
+      for (const f of files) {
+        if (ignored.includes(f)) continue;
+        const childPath = path.join(dirPath, f);
+        try {
+          const childNode = buildFileTree(childPath, rootPath);
+          children.push(childNode);
+        } catch (err) {
+          // ignore inaccessible files
+        }
+      }
+
+      children.sort((a, b) => {
+        if (a.isDir && !b.isDir) return -1;
+        if (!a.isDir && b.isDir) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      return {
+        name: name || 'root',
+        path: relPath,
+        isDir: true,
+        children
+      };
     };
-    res.json(mockTree);
+
+    const tree = buildFileTree(projectRoot, projectRoot);
+    res.json(tree);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1509,6 +2258,48 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('session:request_join', ({ roomId, userId, username }) => {
+    db.get('SELECT created_by_user_id, repo_name, branch_name FROM session_rooms WHERE id = ?', [roomId], (err, room) => {
+      if (err || !room) {
+        socket.emit('session:join_response', { approve: false, error: 'Room not found.' });
+        return;
+      }
+      
+      const hostId = room.created_by_user_id;
+      if (!hostId || hostId === userId) {
+        socket.emit('session:join_response', { approve: true });
+        return;
+      }
+      
+      const requestId = socket.id;
+      let hostSocketFound = false;
+      for (const [sid, uid] of socketUserMap.entries()) {
+        if (uid === hostId) {
+          io.to(sid).emit('session:join_request', {
+            requestId,
+            userId,
+            username,
+            roomId,
+            repoName: room.repo_name,
+            branchName: room.branch_name
+          });
+          hostSocketFound = true;
+        }
+      }
+      
+      if (!hostSocketFound) {
+        socket.emit('session:join_response', { approve: false, error: 'Host is offline.' });
+      } else {
+        console.log(`[Socket] Sent join request from user ${userId} (${username}) to host ${hostId}`);
+      }
+    });
+  });
+
+  socket.on('session:respond_join', ({ requestId, approve }) => {
+    io.to(requestId).emit('session:join_response', { approve });
+    console.log(`[Socket] Host responded to join request ${requestId}: approve = ${approve}`);
+  });
+
   socket.on('room:join', ({ repo, branch }) => {
     const roomName = `${repo}/${branch}`;
     socket.join(roomName);
@@ -1540,26 +2331,6 @@ io.on('connection', (socket) => {
     console.log('[Socket] Client disconnected:', socket.id);
     const userId = socketUserMap.get(socket.id);
     if (userId) {
-      // Find what room they were in to publish session leave event
-      db.get("SELECT repo_name, branch_name FROM presence WHERE user_id = ?", [userId], (err, pRow) => {
-        if (pRow) {
-          eventBus.publish({
-            event_type: 'presence:ended',
-            event_category: 'session',
-            user_id: userId,
-            repo_name: pRow.repo_name,
-            branch_name: pRow.branch_name,
-            metadata: { disconnect_reason: 'socket_drop' }
-          });
-        }
-        
-        db.run("DELETE FROM presence WHERE user_id = ?", [userId], (err) => {
-          if (!err) {
-            console.log(`[Socket] Cleared presence on disconnect for user ${userId}`);
-            broadcastPresence();
-          }
-        });
-      });
       socketUserMap.delete(socket.id);
     }
   });

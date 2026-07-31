@@ -1,23 +1,182 @@
+require('dotenv').config();
 const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 
 const dbPath = path.resolve(__dirname, process.env.DATABASE_FILE || 'teamsync.db');
+const usePostgres = !!process.env.DATABASE_URL;
 
-// Ensure db directory exists
-const dbDir = path.dirname(dbPath);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
+let db;
 
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to the SQLite database at:', dbPath);
-    initializeSchema();
+if (usePostgres) {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL
+  });
+
+  const convertQuery = (sql) => {
+    let count = 1;
+    let newSql = sql.replace(/\?/g, () => `$${count++}`);
+    
+    if (newSql.toUpperCase().includes('INSERT OR IGNORE')) {
+      newSql = newSql.replace(/INSERT OR IGNORE/i, 'INSERT');
+      if (newSql.includes('users')) {
+        newSql += ' ON CONFLICT (username) DO NOTHING';
+      } else if (newSql.includes('repositories')) {
+        newSql += ' ON CONFLICT (name) DO NOTHING';
+      } else if (newSql.includes('integrations')) {
+        newSql += ' ON CONFLICT (source_key) DO NOTHING';
+      }
+    }
+    
+    newSql = newSql.replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY');
+    
+    if (newSql.trim().toUpperCase().startsWith('INSERT')) {
+      if (!newSql.toUpperCase().includes('RETURNING')) {
+        newSql += ' RETURNING id';
+      }
+    }
+
+    return newSql;
+  };
+
+  class PostgresDbWrapper {
+    constructor() {
+      console.log('Connected to PostgreSQL Database at:', process.env.DATABASE_URL.split('@')[1] || 'remote-host');
+      // Schema will be initialized by initializeSchema callback triggered below
+    }
+
+    run(sql, params, callback) {
+      if (typeof params === 'function') {
+        callback = params;
+        params = [];
+      }
+      const newSql = convertQuery(sql);
+      pool.query(newSql, params || [])
+        .then(res => {
+          if (callback) {
+            const lastID = res.rows[0]?.id || null;
+            const context = {
+              lastID: lastID,
+              changes: res.rowCount
+            };
+            callback.call(context, null);
+          }
+        })
+        .catch(err => {
+          if (callback) {
+            callback(err);
+          } else {
+            console.error('Postgres run error:', err.message, 'SQL:', newSql);
+          }
+        });
+      return this;
+    }
+
+    get(sql, params, callback) {
+      if (typeof params === 'function') {
+        callback = params;
+        params = [];
+      }
+      const newSql = convertQuery(sql);
+      pool.query(newSql, params || [])
+        .then(res => {
+          if (callback) {
+            callback(null, res.rows[0] || null);
+          }
+        })
+        .catch(err => {
+          if (callback) {
+            callback(err);
+          } else {
+            console.error('Postgres get error:', err.message, 'SQL:', newSql);
+          }
+        });
+      return this;
+    }
+
+    all(sql, params, callback) {
+      if (typeof params === 'function') {
+        callback = params;
+        params = [];
+      }
+      const newSql = convertQuery(sql);
+      pool.query(newSql, params || [])
+        .then(res => {
+          if (callback) {
+            callback(null, res.rows || []);
+          }
+        })
+        .catch(err => {
+          if (callback) {
+            callback(err);
+          } else {
+            console.error('Postgres all error:', err.message, 'SQL:', newSql);
+          }
+        });
+      return this;
+    }
+
+    exec(sql, callback) {
+      const newSql = convertQuery(sql);
+      pool.query(newSql)
+        .then(() => {
+          if (callback) callback(null);
+        })
+        .catch(err => {
+          if (callback) callback(err);
+        });
+      return this;
+    }
+
+    serialize(callback) {
+      callback();
+      return this;
+    }
+
+    prepare(sql) {
+      const dbInstance = this;
+      return {
+        run: function(...args) {
+          let params = args;
+          let callback = null;
+          if (typeof args[args.length - 1] === 'function') {
+            callback = args[args.length - 1];
+            params = args.slice(0, args.length - 1);
+          }
+          if (params.length === 1 && Array.isArray(params[0])) {
+            params = params[0];
+          }
+          dbInstance.run(sql, params, callback);
+          return this;
+        },
+        finalize: function() {}
+      };
+    }
   }
-});
+
+  db = new PostgresDbWrapper();
+  // Trigger schema setup
+  setTimeout(() => {
+    initializeSchema();
+  }, 50);
+
+} else {
+  // Ensure db directory exists
+  const dbDir = path.dirname(dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+
+  db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('Error opening database:', err.message);
+    } else {
+      console.log('Connected to the SQLite database at:', dbPath);
+      initializeSchema();
+    }
+  });
+}
 
 function initializeSchema() {
   db.serialize(() => {
@@ -83,6 +242,7 @@ function initializeSchema() {
         active_file TEXT,
         staged_files TEXT,
         modified_files TEXT,
+        conflicted_files TEXT,
         current_ticket TEXT,
         last_activity TEXT,
         FOREIGN KEY (user_id) REFERENCES users(id)
@@ -98,8 +258,10 @@ function initializeSchema() {
     addPresenceColumn('active_file');
     addPresenceColumn('staged_files');
     addPresenceColumn('modified_files');
+    addPresenceColumn('conflicted_files');
     addPresenceColumn('current_ticket');
     addPresenceColumn('last_activity');
+    addPresenceColumn('last_heartbeat');
 
     // Create Chat Messages table
     db.run(`
@@ -124,6 +286,7 @@ function initializeSchema() {
         session_link TEXT,
         created_by_user_id INTEGER,
         created_at TEXT,
+        closed_at TEXT,
         status TEXT DEFAULT 'active'
       )
     `);
@@ -138,6 +301,7 @@ function initializeSchema() {
         commit_hash TEXT,
         status TEXT,
         deployed_at TEXT,
+        changelog TEXT,
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
@@ -172,9 +336,34 @@ function initializeSchema() {
         name TEXT UNIQUE,
         description TEXT,
         github_repo TEXT,
+        allow_sandbox_deploy INTEGER DEFAULT 0,
+        branch_strategy TEXT DEFAULT 'main-only',
         created_at TEXT
       )
     `);
+
+    // Migrate existing table if needed by adding allow_sandbox_deploy column
+    db.run("ALTER TABLE repositories ADD COLUMN allow_sandbox_deploy INTEGER DEFAULT 0", (err) => {
+      // Ignore if column already exists
+    });
+
+    db.run("ALTER TABLE repositories ADD COLUMN branch_strategy TEXT DEFAULT 'main-only'", (err) => {
+      // Ignore if column already exists
+    });
+
+    // Migrate session_rooms table if needed by adding closed_at column
+    db.run("ALTER TABLE session_rooms ADD COLUMN closed_at TEXT", (err) => {
+      // Ignore if column already exists
+    });
+
+    // Migrate deployments table if needed by adding changelog column
+    db.run("ALTER TABLE deployments ADD COLUMN changelog TEXT", (err) => {
+      // Ignore if column already exists
+    });
+
+    // Run startup updates to enforce correct values for TeamSync and Shift_Software
+    db.run("UPDATE repositories SET github_repo = 'NathanWorkPrime/TeamSync', allow_sandbox_deploy = 1 WHERE name = 'TeamSync'");
+    db.run("UPDATE repositories SET allow_sandbox_deploy = 0 WHERE name = 'Shift_Software'");
 
     // Create Documentation table
     db.run(`
@@ -196,165 +385,69 @@ function initializeSchema() {
       )
     `);
 
+    // Create Tasks table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_name TEXT,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT DEFAULT 'todo',
+        priority TEXT DEFAULT 'medium',
+        assignee_user_id INTEGER,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY (assignee_user_id) REFERENCES users(id)
+      )
+    `);
+
+    // Create Changelog table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS changelog_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_name TEXT NOT NULL,
+        branch_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        author_user_id INTEGER,
+        created_at TEXT,
+        FOREIGN KEY (author_user_id) REFERENCES users(id)
+      )
+    `);
+
     // Create Indexes for event queries optimization
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_repo_branch ON events(repo_name, branch_name)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_user ON events(user_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
 
-    // Seed initial users if table is empty
-    db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding users...");
-        const stmt = db.prepare("INSERT INTO users (username, display_name, email, avatar_color) VALUES (?, ?, ?, ?)");
-        stmt.run("you", "You", "you@company.com", "var(--violet)");
-        stmt.run("sarah", "Sarah", "sarah@company.com", "var(--violet)");
-        stmt.run("david", "David", "david@company.com", "var(--amber)");
-        stmt.run("tom", "Tom", "tom@company.com", "var(--red)");
-        stmt.finalize();
-        
-        // Seed presence info corresponding to mock state
-        db.serialize(() => {
-          db.run("INSERT OR REPLACE INTO presence (user_id, repo_name, branch_name, session_link, started_at) VALUES (2, 'Shift_Software', 'development', 'oct://join/TS-4K9-XZQ2', ?)", [new Date(Date.now() - 32 * 60000).toISOString()]);
-          db.run("INSERT OR REPLACE INTO presence (user_id, repo_name, branch_name, session_link, started_at) VALUES (3, 'Shift_Software', 'uat', '', ?)", [new Date(Date.now() - 40 * 60000).toISOString()]);
-          db.run("INSERT OR REPLACE INTO presence (user_id, repo_name, branch_name, session_link, started_at) VALUES (4, 'Shift_Software', 'live', 'oct://join/TS-MOB-APP', ?)", [new Date(Date.now() - 180 * 60000).toISOString()]);
+    // Seed initial users and repositories if not skipped
+    const skipSeed = process.env.SKIP_SEED && process.env.SKIP_SEED.trim().toLowerCase() === 'true';
+    if (!skipSeed) {
+      db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
+        if (row && row.count === 0) {
+          console.log("Seeding users...");
+          const stmt = db.prepare("INSERT INTO users (username, display_name, email, avatar_color) VALUES (?, ?, ?, ?)");
+          stmt.run("you", "You", "you@company.com", "var(--violet)");
+          stmt.run("sarah", "Sarah", "sarah@company.com", "var(--violet)");
+          stmt.run("david", "David", "david@company.com", "var(--amber)");
+          stmt.run("tom", "Tom", "tom@company.com", "var(--red)");
+          stmt.finalize();
+        }
+      });
 
-          // Seed active session rooms to match initial presence
-          db.run("INSERT INTO session_rooms (repo_name, branch_name, oct_room_id, session_link, created_by_user_id, created_at, status) VALUES ('Shift_Software', 'development', 'TS-4K9-XZQ2', 'oct://join/TS-4K9-XZQ2', 2, ?, 'active')", [new Date().toISOString()]);
-          db.run("INSERT INTO session_rooms (repo_name, branch_name, oct_room_id, session_link, created_by_user_id, created_at, status) VALUES ('Shift_Software', 'live', 'TS-MOB-APP', 'oct://join/TS-MOB-APP', 4, ?, 'active')", [new Date().toISOString()]);
-        });
-      }
-    });
-
-    // Seed initial tickets if table is empty
-    db.get("SELECT COUNT(*) as count FROM tickets", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding tickets...");
-        const stmt = db.prepare(`
-          INSERT INTO tickets (
-            source, external_id, external_url, title, description, status, priority, 
-            assignee_user_id, repo_or_project, created_at, updated_at, last_synced_at, last_change_origin
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'external')
-        `);
-        const now = new Date().toISOString();
-
-        // 1. Fix broken contact form validation (assigned to You)
-        stmt.run("github", "101", "https://github.com/Tech-Finity/Shift_Software/issues/101", 
-                 "Fix broken contact form validation", "Form submissions fail on Safari 15 due to missing regex support.", 
-                 "todo", "urgent", 1, "Shift_Software", now, now, now);
-
-        // 2. Add favicon set for all sizes (unassigned)
-        stmt.run("github", "102", "https://github.com/Tech-Finity/Shift_Software/issues/102", 
-                 "Add favicon set for all sizes", "Ensure we cover Apple touch icon and Android high res icons.", 
-                 "todo", "low", null, "Shift_Software", now, now, now);
-
-        // 3. Update pricing table copy (assigned to You)
-        stmt.run("github", "103", "https://github.com/Tech-Finity/Shift_Software/issues/103", 
-                 "Update pricing table copy", "Change Enterprise tier pricing to Contact Sales.", 
-                 "in-progress", "medium", 1, "Shift_Software", now, now, now);
-
-        // 4. Rebuild about page hero section (assigned to David)
-        stmt.run("github", "104", "https://github.com/Tech-Finity/Shift_Software/issues/104", 
-                 "Rebuild about page hero section", "Use the new grid design system layout for better typography scaling.", 
-                 "in-progress", "high", 3, "Shift_Software", now, now, now);
-
-        // 5. Add newsletter signup block (assigned to Sarah)
-        stmt.run("github", "105", "https://github.com/Tech-Finity/Shift_Software/issues/105", 
-                 "Add newsletter signup block", "Integrate with Mailchimp API and handle double opt-in.", 
-                 "review", "medium", 2, "Shift_Software", now, now, now);
-
-        // 6. Fix nav spacing on tablet (assigned to David)
-        stmt.run("github", "106", "https://github.com/Tech-Finity/Shift_Software/issues/106", 
-                 "Fix nav spacing on tablet", "Reduce horizontal padding to 16px below 1024px viewport width.", 
-                 "done", "low", 3, "Shift_Software", now, now, now);
-
-        stmt.finalize();
-      }
-    });
-
-    // Seed sample integration
-    db.get("SELECT COUNT(*) as count FROM integrations", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding integrations...");
-        db.run(`
-          INSERT INTO integrations (source_key, display_name, inbound_webhook_secret, outbound_callback_url, outbound_api_key, created_at)
-          VALUES ('client-app-alpha', 'Client App Alpha', 'secret_alpha_123', 'http://localhost:8080/webhooks/tickets', 'key_alpha_123', ?)
-        `, [new Date().toISOString()]);
-      }
-    });
-
-    // Seed mock chat messages
-    db.get("SELECT COUNT(*) as count FROM chat_messages", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding chat messages...");
-        const stmt = db.prepare(`
-          INSERT INTO chat_messages (repo_name, branch_name, user_id, message, sent_at)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        const todayStr = new Date().toISOString().split('T')[0];
-        
-        // Sarah's message
-        stmt.run('Shift_Software', 'development', 2, 'Starting on the form validation, will push in ~20', `${todayStr}T09:04:00.000Z`);
-        // David's message
-        stmt.run('Shift_Software', 'development', 3, "Cool, I'll leave the shared header alone then", `${todayStr}T09:06:00.000Z`);
-        
-        stmt.finalize();
-      }
-    });
-
-    // Seed initial repositories
-    db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding repositories...");
-        const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, created_at) VALUES (?, ?, ?, ?)");
-        const now = new Date().toISOString();
-        stmt.run("TeamSync", "Operational control centre for software development (local workspace).", null, now);
-        stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", now);
-        stmt.finalize();
-      }
-    });
-
-    // Seed initial documentation
-    db.get("SELECT COUNT(*) as count FROM documentation", (err, row) => {
-      if (row && row.count === 0) {
-        console.log("Seeding documentation...");
-        const stmt = db.prepare(`
-          INSERT INTO documentation (title, content, scope, repo_name, ticket_id, session_id, doc_type, created_by_user_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        const now = new Date().toISOString();
-        
-        // 1. Project level ADR
-        stmt.run(
-          "ADR 001: SQLite for Local Event Store",
-          "# ADR 001: SQLite for Local Event Store\n\n## Status\nApproved\n\n## Context\nWe need a low-latency, persistent event store for our local development dashboard. The event store must survive server restarts and require zero complex infrastructure setup for developers.\n\n## Decision\nWe choose SQLite as the persistent database engine. It stores data in a single local file, is extremely fast for reads, and supports complex relational query filters.\n\n## Consequences\nNo external database server (like Postgres) needs to be running. However, SQLite is not suitable for high write concurrency in multi-instance production environments, which fits our local dev operations centre scope perfectly.",
-          "project", "TeamSync", null, null, "adr", 1, now, now
-        );
-
-        // 2. Project level Setup Guide
-        stmt.run(
-          "Setup Guide: Local Dev Server",
-          "# TeamSync Local Setup Guide\n\nTo start developing on TeamSync locally, follow these steps:\n\n1. Run `npm install` in the root.\n2. Start backend and frontend simultaneously with `npm run dev`.\n3. Make sure VS Code is running with the `teamsync-extension` installed to enable local Git branch switching and session hosting.",
-          "project", "TeamSync", null, null, "notes", 1, now, now
-        );
-
-        // 3. Ticket level Doc
-        stmt.run(
-          "Requirements: Update pricing table copy",
-          "# Requirements for Ticket 103: Update pricing table copy\n\nChange the Enterprise tier price from '$99/mo' to 'Contact Sales' in the pricing component. Ensure the CTA button changes from 'Buy Now' to 'Talk to Sales' which opens the email contact form.",
-          "ticket", "Shift_Software", 3, null, "requirements", 2, now, now
-        );
-
-        // 4. Session level Notes
-        stmt.run(
-          "Session Notes: Debugging safari regex bug",
-          "# Session Notes: Safari 15 Regex Bug\n\nWe tracked down the safari validation bug. Safari 15 does not support lookbehind assertions in regular expressions (\`?<= \`). We need to rewrite the regex in \`contactForm.js\` to use standard grouping instead of lookbehind.",
-          "session", "Shift_Software", null, 1, "notes", 3, now, now
-        );
-
-        stmt.finalize();
-      }
-    });
+      db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
+        if (row && row.count === 0) {
+          console.log("Seeding repositories...");
+          const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
+          const now = new Date().toISOString();
+          stmt.run("TeamSync", "Operational control centre for software development (local workspace).", "NathanWorkPrime/TeamSync", 1, now);
+          stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
+          stmt.finalize();
+        }
+      });
+    } else {
+      console.log("[Database] SKIP_SEED=true detected. Skipping database seeding.");
+    }
   });
 }
 

@@ -8,7 +8,7 @@ import Session from './pages/Session';
 import Integrations from './pages/Integrations';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:5000', { autoConnect: false });
+const socket = io(import.meta.env.VITE_API_URL || window.location.origin, { autoConnect: false });
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -39,6 +39,7 @@ export default function App() {
   });
 
   const [sessionError, setSessionError] = useState(null);
+  const [joinRequest, setJoinRequest] = useState(null);
 
   // Fetch initial seed users
   const fetchUsers = async () => {
@@ -142,7 +143,7 @@ export default function App() {
       try {
         const user = JSON.parse(cached);
         setCurrentUser(user);
-        setActiveView('home');
+        setActiveView('projects');
         
         // Push user credentials to companion extension on load
         fetch('http://localhost:37845/configure', {
@@ -178,9 +179,23 @@ export default function App() {
       }));
     });
 
+    socket.on('session:join_response', ({ approve, error }) => {
+      setJoinRequest(prev => {
+        if (!prev) return null;
+        if (approve) {
+          if (prev.onApproved) prev.onApproved();
+          return null;
+        } else {
+          setSessionError(error || 'The session host has denied your request to join.');
+          return null;
+        }
+      });
+    });
+
     return () => {
       socket.off('presence:update');
       socket.off('activity:new');
+      socket.off('session:join_response');
       socket.disconnect();
     };
   }, [currentUser]);
@@ -217,7 +232,7 @@ export default function App() {
   // Handle username selection
   const handleLogin = (user) => {
     setCurrentUser(user);
-    setActiveView('home');
+    setActiveView('projects');
     localStorage.setItem('teamsync_current_user', JSON.stringify(user));
 
     // Configure companion extension with logged in user context
@@ -296,10 +311,11 @@ export default function App() {
       let sessionLink = '';
       let octRoomId = '';
 
+      let activeRoom = null;
       try {
         const activeRoomRes = await fetch(`/api/session-rooms/active?repo=${selectedRepo}&branch=${branchName}`);
         if (activeRoomRes.ok) {
-          const activeRoom = await activeRoomRes.json();
+          activeRoom = await activeRoomRes.json();
           if (activeRoom) {
             sessionLink = activeRoom.session_link;
             octRoomId = activeRoom.oct_room_id;
@@ -311,26 +327,72 @@ export default function App() {
       }
 
       if (sessionLink) {
-        // Active room exists! Join it via companion extension
-        try {
-          console.log('[App] Instructing companion extension to join existing session:', sessionLink);
-          const extRes = await fetch('http://localhost:37845/join-session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              repo: selectedRepo,
-              branch: branchName,
-              room_id: octRoomId,
-              session_link: sessionLink
-            })
-          });
-          if (!extRes.ok) {
-            throw new Error('Companion extension failed to join the session.');
+        const isHost = activeRoom && activeRoom.created_by_user_id === currentUser.id;
+        
+        const proceedJoin = async () => {
+          try {
+            console.log('[App] Instructing companion extension to join existing session:', sessionLink);
+            const extRes = await fetch('http://localhost:37845/join-session', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                repo: selectedRepo,
+                branch: branchName,
+                room_id: octRoomId,
+                session_link: sessionLink
+              })
+            });
+            if (!extRes.ok) {
+              throw new Error('Companion extension failed to join the session.');
+            }
+          } catch (joinErr) {
+            console.error('[App] Companion extension failed to join session:', joinErr.message);
+            setSessionError('Failed to connect to the companion extension. Please ensure VS Code/Antigravity is open and running.');
+            return;
           }
-        } catch (joinErr) {
-          console.error('[App] Companion extension failed to join session:', joinErr.message);
-          setSessionError('Failed to connect to the companion extension. Please ensure VS Code/Antigravity is open and running.');
-          return;
+
+          try {
+            const res = await fetch('/api/presence', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                user_id: currentUser.id,
+                repo_name: selectedRepo,
+                branch_name: branchName,
+                session_link: sessionLink
+              })
+            });
+
+            if (res.ok) {
+              setSessionData({
+                repo: selectedRepo,
+                branch: branchName,
+                sessionLink: sessionLink
+              });
+              fetchPresence();
+              fetchTodayData();
+              setRepoSubTab('sessions');
+              setActiveView('repo');
+            }
+          } catch (err) {
+            console.error('Error starting session:', err);
+          }
+        };
+
+        if (isHost) {
+          await proceedJoin();
+        } else {
+          setJoinRequest({
+            status: 'pending',
+            hostName: activeRoom.creator_display_name || 'Host',
+            roomId: activeRoom.id,
+            onApproved: proceedJoin
+          });
+          socket.emit('session:request_join', {
+            roomId: activeRoom.id,
+            userId: currentUser.id,
+            username: currentUser.display_name || currentUser.username
+          });
         }
       } else {
         // No active room! Create a new one via companion extension
@@ -368,33 +430,76 @@ export default function App() {
           setSessionError('Could not start a companion session. Make sure VS Code/Antigravity is running with the extension enabled.');
           return;
         }
-      }
+        try {
+          const res = await fetch('/api/presence', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user_id: currentUser.id,
+              repo_name: selectedRepo,
+              branch_name: branchName,
+              session_link: sessionLink
+            })
+          });
 
-      try {
-        const res = await fetch('/api/presence', {
+          if (res.ok) {
+            setSessionData({
+              repo: selectedRepo,
+              branch: branchName,
+              sessionLink: sessionLink
+            });
+            fetchPresence();
+            fetchTodayData();
+            setRepoSubTab('sessions');
+            setActiveView('repo');
+          }
+        } catch (err) {
+          console.error('Error starting session:', err);
+        }
+      }
+    }
+  };
+
+  // Leave active session (host ends, rider leaves)
+  const handleLeaveSession = async (roomId, isHost) => {
+    try {
+      if (isHost) {
+        const res = await fetch(`/api/session-rooms/${roomId}/close`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_id: currentUser.id,
-            repo_name: selectedRepo,
-            branch_name: branchName,
-            session_link: sessionLink
-          })
+          body: JSON.stringify({ user_id: currentUser.id })
         });
-
         if (res.ok) {
-          setSessionData({
-            repo: selectedRepo,
-            branch: branchName,
-            sessionLink: sessionLink
-          });
+          fetch('http://localhost:37845/leave-session', {
+            method: 'POST'
+          }).catch(() => {});
+          
           fetchPresence();
           fetchTodayData();
-          setActiveView('session');
+          if (selectedRepo) fetchBranches(selectedRepo);
+          
+          setSessionData(null);
+          setActiveView('repo');
         }
-      } catch (err) {
-        console.error('Error starting session:', err);
+      } else {
+        const res = await fetch(`/api/presence/${currentUser.id}`, {
+          method: 'DELETE'
+        });
+        if (res.ok) {
+          fetch('http://localhost:37845/leave-session', {
+            method: 'POST'
+          }).catch(() => {});
+          
+          fetchPresence();
+          fetchTodayData();
+          if (selectedRepo) fetchBranches(selectedRepo);
+          
+          setSessionData(null);
+          setActiveView('repo');
+        }
       }
+    } catch (err) {
+      console.error('Error leaving session:', err);
     }
   };
 
@@ -591,11 +696,12 @@ export default function App() {
           />
         );
       case 'projects':
-        return <Projects repos={repos} onSelectRepo={handleSelectRepo} />;
+        return <Projects repos={repos} onSelectRepo={handleSelectRepo} onRegisterSuccess={fetchRepos} />;
       case 'repo':
         return (
           <RepoView 
             repoName={selectedRepo} 
+            githubRepo={repos.find(r => r.name === selectedRepo)?.github_repo}
             onBack={() => setActiveView('projects')} 
             branches={branches}
             tickets={tickets}
@@ -605,6 +711,7 @@ export default function App() {
             onWorkOnBranch={handleWorkOnBranch}
             onAddTicket={handleAddTicket}
             onUpdateTicketStatus={handleUpdateTicketStatus}
+            onLeaveSession={handleLeaveSession}
           />
         );
       case 'session':
@@ -615,6 +722,7 @@ export default function App() {
             currentUser={currentUser}
             onSavePresence={handleSavePresence}
             socket={socket}
+            onLeaveSession={handleLeaveSession}
           />
         );
       case 'integrations':
@@ -675,6 +783,80 @@ export default function App() {
         )}
         {renderView()}
       </main>
+
+      {joinRequest && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(15, 23, 42, 0.85)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          backdropFilter: 'blur(4px)',
+          fontFamily: 'Inter, sans-serif'
+        }}>
+          <div className="card" style={{
+            width: '420px',
+            padding: '28px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            textAlign: 'center',
+            border: '2px solid var(--teal)',
+            boxShadow: '0 8px 32px rgba(77, 238, 234, 0.15)',
+            background: 'var(--surface)',
+            borderRadius: '12px'
+          }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--teal)', margin: 0 }}>
+              {joinRequest.status === 'pending' && 'Requesting Workspace Access'}
+              {joinRequest.status === 'denied' && 'Access Denied'}
+              {joinRequest.status === 'offline' && 'Host Offline'}
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
+              {joinRequest.status === 'pending' && (
+                <>
+                  Sending request to join <strong>{joinRequest.hostName}</strong>'s session.
+                  <br />
+                  <span style={{ display: 'inline-block', marginTop: '12px', fontSize: '12px', color: 'var(--text-dim)' }}>
+                    ⚠️ Note: By joining, you will co-edit files directly on the host's local machine workspace.
+                  </span>
+                </>
+              )}
+              {joinRequest.status === 'denied' && `The session host, ${joinRequest.hostName}, has denied your access request.`}
+              {joinRequest.status === 'offline' && `The session host, ${joinRequest.hostName}, is currently offline.`}
+            </p>
+            
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: '8px' }}>
+              {joinRequest.status === 'pending' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                  <div className="spin" style={{ width: '20px', height: '20px', border: '2px solid var(--teal)', borderTopColor: 'transparent', borderRadius: '50%' }}></div>
+                  <span style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Waiting for host approval...</span>
+                  <button 
+                    onClick={() => setJoinRequest(null)}
+                    className="btn-secondary"
+                    style={{ padding: '6px 16px', fontSize: '12px', marginTop: '8px', cursor: 'pointer', borderRadius: '6px' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => setJoinRequest(null)}
+                  className="btn-primary"
+                  style={{ padding: '8px 20px', fontSize: '13px', cursor: 'pointer', borderRadius: '6px' }}
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-export default function Integrations({ integrations, onRegisterIntegration }) {
+export default function Integrations({ integrations = [], onRegisterIntegration, embedded = false }) {
   const [sourceKey, setSourceKey] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
@@ -10,11 +10,16 @@ export default function Integrations({ integrations, onRegisterIntegration }) {
     e.preventDefault();
     if (!sourceKey || !displayName) return;
 
-    onRegisterIntegration({
-      source_key: sourceKey.trim().toLowerCase().replace(/\s+/g, '-'),
-      display_name: displayName.trim(),
-      outbound_callback_url: callbackUrl.trim()
-    });
+    if (onRegisterIntegration) {
+      onRegisterIntegration({
+        source_key: sourceKey.trim().toLowerCase().replace(/\s+/g, '-'),
+        display_name: displayName.trim(),
+        outbound_callback_url: callbackUrl.trim()
+      });
+    } else {
+      console.warn("onRegisterIntegration callback is not defined.");
+      alert("Registration submitted! (Integrations backend is currently not configured)");
+    }
 
     // Reset Form
     setSourceKey('');
@@ -25,14 +30,16 @@ export default function Integrations({ integrations, onRegisterIntegration }) {
 
   return (
     <div className="view">
-      <div className="page-header-card">
-        <div className="page-header-title-area">
-          <div className="page-header-title">External Client Integrations</div>
-          <div className="page-header-desc">
-            Manage two-way sync credentials for internal client apps and companion extensions.
+      {!embedded && (
+        <div className="page-header-card">
+          <div className="page-header-title-area">
+            <div className="page-header-title">External Client Integrations</div>
+            <div className="page-header-desc">
+              Manage two-way sync credentials for internal client apps and companion extensions.
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h2 className="display" style={{ fontSize: '18px', fontWeight: 600 }}>

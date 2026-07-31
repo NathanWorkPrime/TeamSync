@@ -26,6 +26,18 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src"
   },
+  "contributes": {
+    "configuration": {
+      "title": "TeamSync Companion",
+      "properties": {
+        "teamsync.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:5000",
+          "description": "The URL of the remote hosted TeamSync Server."
+        }
+      }
+    }
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2"
