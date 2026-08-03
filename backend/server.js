@@ -28,18 +28,36 @@ app.use((req, res, next) => {
   const sessionToken = req.headers['x-user-session'];
   if (sessionToken) {
     const encryption = require('./services/encryption');
-    const decryptedUsername = encryption.decrypt(sessionToken);
-    if (decryptedUsername) {
-      db.get('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [decryptedUsername.trim()], (err, user) => {
-        if (!err && user) {
-          req.user = user;
-          req.orgId = user.organization_id;
-        } else {
-          console.warn(`[AuthMiddleware] Session token decrypted to '${decryptedUsername}' but user was not found in DB.`);
+    const decrypted = encryption.decrypt(sessionToken);
+    if (decrypted) {
+      let username = null;
+      let expiresAt = null;
+      try {
+        const parsed = JSON.parse(decrypted);
+        username = parsed.username;
+        expiresAt = parsed.expiresAt;
+      } catch (e) {
+        // Fallback for raw legacy session tokens
+        username = decrypted;
+      }
+
+      if (username) {
+        if (expiresAt && expiresAt < Date.now()) {
+          console.warn(`[AuthMiddleware] Session token for '${username}' has expired.`);
+          return next();
         }
-        next();
-      });
-      return;
+
+        db.get('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [username.trim()], (err, user) => {
+          if (!err && user) {
+            req.user = user;
+            req.orgId = user.organization_id;
+          } else {
+            console.warn(`[AuthMiddleware] Session token decrypted to '${username}' but user was not found in DB.`);
+          }
+          next();
+        });
+        return;
+      }
     }
   }
 
@@ -332,19 +350,19 @@ app.get('/api/auth/config', (req, res) => {
   });
 });
 
-// POST /api/auth/login - Developer Bypass session generator
+// POST /api/auth/login - Developer Bypass session generator (restricted to dev mock logins)
 app.post('/api/auth/login', (req, res) => {
+  if (process.env.ALLOW_DEV_MOCK_LOGIN !== 'true') {
+    return res.status(403).json({ error: 'Developer bypass login is disabled in this environment.' });
+  }
+
   const { username } = req.body;
   if (!username) {
     return res.status(400).json({ error: 'Username is required.' });
   }
 
-  if (process.env.ALLOW_DEV_MOCK_LOGIN !== 'true' && username === 'you') {
-    return res.status(403).json({ error: 'Developer bypass is disabled.' });
-  }
-
   const normalized = username.toLowerCase().trim();
-  db.get('SELECT id, username, display_name, email, avatar_color, organization_id, github_id FROM users WHERE LOWER(username) = LOWER(?)', [normalized], (err, user) => {
+  db.get('SELECT id, username, display_name, email, avatar_color, organization_id, github_id, github_token FROM users WHERE LOWER(username) = LOWER(?)', [normalized], (err, user) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -352,8 +370,20 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(404).json({ error: 'User not found.' });
     }
 
+    // Security check: Never issue bypass session tokens for users with linked GitHub accounts
+    if (user.github_id || user.github_token) {
+      return res.status(403).json({ error: 'Cannot use developer bypass for GitHub-linked accounts.' });
+    }
+
     const encryption = require('./services/encryption');
-    const sessionToken = encryption.encrypt(user.username);
+    const tokenPayload = JSON.stringify({
+      username: user.username,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hour session expiration
+    });
+    const sessionToken = encryption.encrypt(tokenPayload);
+    
+    delete user.github_token; // Exclude token from response
+
     res.json({
       ...user,
       session_token: sessionToken
@@ -442,7 +472,11 @@ app.get('/api/auth/github/callback', async (req, res) => {
     const avatarColor = 'var(--teal)'; // Unique color for GitHub OAuth accounts
     
     db.get('SELECT * FROM users WHERE github_id = ? OR username = ?', [githubId, username], (err, existingUser) => {
-      const sessionToken = encryption.encrypt(username);
+      const tokenPayload = JSON.stringify({
+        username: username,
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hour session expiration
+      });
+      const sessionToken = encryption.encrypt(tokenPayload);
       if (existingUser) {
         db.run(
           'UPDATE users SET github_id = ?, github_token = ?, email = ? WHERE id = ?',
