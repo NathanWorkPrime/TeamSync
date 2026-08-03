@@ -46,7 +46,7 @@ export default function App() {
   // Fetch initial seed users
   const fetchUsers = async () => {
     try {
-      const res = await fetch('/api/users');
+      const res = await fetch('/api/users?_t=' + Date.now());
       if (res.ok) {
         const data = await res.json();
         setUsers(data);
@@ -69,7 +69,7 @@ export default function App() {
       if (activeUser && activeUser.session_token) {
         headers['X-User-Session'] = activeUser.session_token;
       }
-      const res = await fetch('/api/repos', { headers });
+      const res = await fetch('/api/repos?_t=' + Date.now(), { headers });
       if (res.ok) {
         const data = await res.json();
         setRepos(data);
@@ -149,6 +149,11 @@ export default function App() {
     }
   };
 
+  const clearStorage = () => {
+    localStorage.removeItem('teamsync_current_user');
+    localStorage.removeItem('session_token');
+  };
+
   // Initial load
   useEffect(() => {
     fetchUsers();
@@ -158,6 +163,7 @@ export default function App() {
     const oauthUsername = urlParams.get('username');
     const sessionToken = urlParams.get('session_token');
     if (oauthUsername && sessionToken) {
+      clearStorage();
       // Clear URL parameters
       window.history.replaceState({}, document.title, window.location.pathname);
       
@@ -733,7 +739,7 @@ export default function App() {
 
   // Logout utility
   const handleLogout = () => {
-    localStorage.removeItem('teamsync_current_user');
+    clearStorage();
     setCurrentUser(null);
     setActiveView('login');
 

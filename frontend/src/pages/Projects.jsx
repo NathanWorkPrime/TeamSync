@@ -14,9 +14,6 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         if (parsed && parsed.session_token) token = parsed.session_token;
       } catch (e) {}
     }
-    if (!token) {
-      token = localStorage.getItem('session_token') || '';
-    }
     const headers = { ...extraHeaders };
     if (token) {
       headers['X-User-Session'] = token;

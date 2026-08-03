@@ -23,6 +23,12 @@ eventBus.setSocketIO(io);
 app.use(cors());
 app.use(express.json());
 
+// Disable API caching globally
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  next();
+});
+
 // Multi-Tenancy Tenant Scoping & Authentication Middleware (Phase 1)
 app.use((req, res, next) => {
   const sessionToken = req.headers['x-user-session'];
