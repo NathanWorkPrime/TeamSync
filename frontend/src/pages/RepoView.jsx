@@ -22,7 +22,8 @@ import {
   AlertCircle,
   MessageSquare,
   Settings,
-  BarChart2
+  BarChart2,
+  Monitor
 } from 'lucide-react';
 
 export default function RepoView({ 
@@ -106,6 +107,10 @@ export default function RepoView({
   // Overview state
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
+
+  // Local Git Workspace integration state
+  const [activeOperations, setActiveOperations] = useState({}); // { [branchName]: 'status_message' }
+  const [localWarningModal, setLocalWarningModal] = useState({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
 
   // Docs state
   const [docs, setDocs] = useState([]);
@@ -653,6 +658,94 @@ export default function RepoView({
     setActiveSessionBranch(null);
   };
 
+  const executeCloneOrCheckout = async (branchName, stashChanges, initialStatus) => {
+    setActiveOperations(prev => ({ ...prev, [branchName]: initialStatus }));
+    try {
+      const res = await fetch('http://localhost:37845/clone-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: githubRepo || repoName,
+          branch: branchName,
+          stash: stashChanges
+        })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Server returned ${res.status}`);
+      }
+      
+      // Update status to Opening workspace...
+      setActiveOperations(prev => ({ ...prev, [branchName]: 'Opening workspace...' }));
+      
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      setActiveOperations(prev => ({ ...prev, [branchName]: 'Success!' }));
+      setTimeout(() => {
+        setActiveOperations(prev => {
+          const next = { ...prev };
+          delete next[branchName];
+          return next;
+        });
+      }, 2000);
+    } catch (err) {
+      console.error('[View Locally] Error switching branch:', err);
+      alert(`Failed to view branch locally: ${err.message}`);
+      setActiveOperations(prev => {
+        const next = { ...prev };
+        delete next[branchName];
+        return next;
+      });
+    }
+  };
+
+  const handleViewLocally = async (branchName) => {
+    setActiveOperations(prev => ({ ...prev, [branchName]: 'Checking local repository...' }));
+    try {
+      const res = await fetch(`http://localhost:37845/detect-repo-status?repo=${githubRepo || repoName}&branch=${branchName}`);
+      if (!res.ok) {
+        throw new Error(`Companion server returned status ${res.status}`);
+      }
+      const status = await res.json();
+      
+      let nextStep = 'Syncing workspace...';
+      if (!status.exists) {
+        nextStep = 'Cloning repository...';
+      } else if (status.isGit) {
+        if (status.currentBranch !== branchName) {
+          nextStep = 'Checking out branch...';
+        } else {
+          nextStep = 'Fetching latest changes...';
+        }
+      }
+
+      if (status.exists && status.isGit && status.hasUncommittedChanges) {
+        setLocalWarningModal({
+          isOpen: true,
+          branchName,
+          currentBranch: status.currentBranch || 'unknown',
+          path: status.path,
+          nextStep
+        });
+        setActiveOperations(prev => {
+          const next = { ...prev };
+          delete next[branchName];
+          return next;
+        });
+      } else {
+        await executeCloneOrCheckout(branchName, false, nextStep);
+      }
+    } catch (err) {
+      console.error('[View Locally] Error detecting status:', err);
+      alert(`Failed to connect to TeamSync Companion. Make sure VS Code is open and active.\nError: ${err.message}`);
+      setActiveOperations(prev => {
+        const next = { ...prev };
+        delete next[branchName];
+        return next;
+      });
+    }
+  };
+
   const handleRollback = (deployment) => {
     setRollbackTarget(deployment);
   };
@@ -1058,6 +1151,8 @@ export default function RepoView({
                 repoName={repoName}
                 githubRepo={githubRepo}
                 loading={!branches || branches.length === 0}
+                activeOperations={activeOperations}
+                onViewLocally={handleViewLocally}
               />
             </div>
           )}
@@ -1242,19 +1337,49 @@ export default function RepoView({
                                     </div>
                                   ))}
                                 </div>
-                                <button 
-                                  className="btn-primary" 
-                                  style={{ padding: '6px 14px', fontSize: '12px' }}
-                                  onClick={() => {
-                                    if (sess.members.some(m => m.user_id === currentUser.id)) {
-                                      setActiveSessionBranch(sess.branch);
-                                    } else {
-                                      handleWorkOnBranchWrapper(sess.branch, false);
-                                    }
-                                  }}
-                                >
-                                  {sess.members.some(m => m.user_id === currentUser.id) ? 'Enter Room' : (sess.sessionLink ? 'Join Session' : 'Work on Branch')}
-                                </button>
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                  <button
+                                    className="btn-secondary"
+                                    style={{
+                                      padding: '6px 12px',
+                                      fontSize: '12px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '4px',
+                                      color: activeOperations[sess.branch] ? 'var(--teal)' : 'var(--text-dim)',
+                                      cursor: activeOperations[sess.branch] ? 'not-allowed' : 'pointer',
+                                      border: '1px solid var(--border)',
+                                      background: 'rgba(255,255,255,0.02)'
+                                    }}
+                                    onClick={() => handleViewLocally(sess.branch)}
+                                    disabled={!!activeOperations[sess.branch]}
+                                  >
+                                    {activeOperations[sess.branch] ? (
+                                      <>
+                                        <RefreshCw size={12} className="spin" />
+                                        <span>{activeOperations[sess.branch]}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Monitor size={12} />
+                                        <span>View Locally</span>
+                                      </>
+                                    )}
+                                  </button>
+                                  <button 
+                                    className="btn-primary" 
+                                    style={{ padding: '6px 14px', fontSize: '12px' }}
+                                    onClick={() => {
+                                      if (sess.members.some(m => m.user_id === currentUser.id)) {
+                                        setActiveSessionBranch(sess.branch);
+                                      } else {
+                                        handleWorkOnBranchWrapper(sess.branch, false);
+                                      }
+                                    }}
+                                  >
+                                    {sess.members.some(m => m.user_id === currentUser.id) ? 'Enter Room' : (sess.sessionLink ? 'Join Session' : 'Work on Branch')}
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -2191,6 +2316,56 @@ export default function RepoView({
                 ) : (
                   <span>Continue Rollback</span>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Local Git Workspace Warning Modal */}
+      {localWarningModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '480px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--amber)', boxShadow: '0 8px 32px rgba(245,158,11,0.1)' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--amber)', margin: '0 0 16px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              ⚠️ Uncommitted Local Changes
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: '0 0 20px 0' }}>
+              Your local repository copy has uncommitted changes on branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
+              <br /><br />
+              Switching to branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.branchName}</strong> may cause Git checkout conflicts. What would you like to do?
+            </p>
+            
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' })}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  executeCloneOrCheckout(localWarningModal.branchName, false, localWarningModal.nextStep);
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', border: '1px solid var(--border)' }}
+              >
+                Checkout anyway
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={() => {
+                  executeCloneOrCheckout(localWarningModal.branchName, true, 'Stashing changes & switching...');
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', background: 'var(--teal)', borderColor: 'var(--teal)' }}
+              >
+                Stash & Switch
               </button>
             </div>
           </div>

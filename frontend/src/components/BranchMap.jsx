@@ -16,7 +16,8 @@ import {
   Terminal,
   Server,
   AlertCircle,
-  Lock
+  Lock,
+  Monitor
 } from 'lucide-react';
 
 export default function BranchMap({ 
@@ -26,7 +27,9 @@ export default function BranchMap({
   currentUser, 
   repoName, 
   githubRepo,
-  loading
+  loading,
+  activeOperations = {},
+  onViewLocally
 }) {
   const getHeaders = (extraHeaders = {}) => {
     const cached = localStorage.getItem('teamsync_current_user');
@@ -900,37 +903,72 @@ export default function BranchMap({
             </div>
           )}
 
-          {/* Collaborator Avatars */}
-          {collaborators.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
-              <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>Active:</span>
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                {collaborators.map((c, idx) => (
-                  <div
-                    key={c.id}
-                    title={`${c.name} is working on this`}
-                    style={{
-                      width: '18px',
-                      height: '18px',
-                      borderRadius: '50%',
-                      backgroundColor: c.avatar_color || 'var(--teal)',
-                      color: 'rgba(15,23,42,0.85)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '8.5px',
-                      fontWeight: 800,
-                      border: '1.5px solid var(--surface)',
-                      marginLeft: idx > 0 ? '-6px' : '0',
-                      zIndex: 10 - idx
-                    }}
-                  >
-                    {c.name ? c.name[0].toUpperCase() : 'U'}
-                  </div>
-                ))}
+          {/* Bottom Actions Row: Collaborators & View Locally */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', gap: '8px' }}>
+            {collaborators.length > 0 ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>Active:</span>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  {collaborators.map((c, idx) => (
+                    <div
+                      key={c.id}
+                      title={`${c.name} is working on this`}
+                      style={{
+                        width: '18px',
+                        height: '18px',
+                        borderRadius: '50%',
+                        backgroundColor: c.avatar_color || 'var(--teal)',
+                        color: 'rgba(15,23,42,0.85)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '8.5px',
+                        fontWeight: 800,
+                        border: '1.5px solid var(--surface)',
+                        marginLeft: idx > 0 ? '-6px' : '0',
+                        zIndex: 10 - idx
+                      }}
+                    >
+                      {c.name ? c.name[0].toUpperCase() : 'U'}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            ) : <div />}
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onViewLocally) onViewLocally(node.name);
+              }}
+              className="btn-secondary"
+              style={{
+                padding: '4px 8px',
+                fontSize: '11px',
+                borderRadius: '6px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                border: '1px solid var(--border)',
+                background: 'rgba(255,255,255,0.02)',
+                color: activeOperations[node.name] ? 'var(--teal)' : 'var(--text-dim)',
+                cursor: activeOperations[node.name] ? 'not-allowed' : 'pointer'
+              }}
+              disabled={!!activeOperations[node.name]}
+            >
+              {activeOperations[node.name] ? (
+                <>
+                  <RefreshCw size={11} className="spin" />
+                  <span>{activeOperations[node.name]}</span>
+                </>
+              ) : (
+                <>
+                  <Monitor size={11} />
+                  <span>View Locally</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Child branches */}
