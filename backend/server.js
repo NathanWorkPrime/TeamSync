@@ -9,6 +9,7 @@ const chatService = require('./services/chatService');
 const eventBus = require('./services/eventBus');
 
 const app = express();
+app.enable('trust proxy');
 const PORT = process.env.PORT || 5000;
 
 const server = http.createServer(app);
