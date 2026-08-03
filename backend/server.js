@@ -536,6 +536,13 @@ app.get('/api/auth/github/callback', async (req, res) => {
     const avatarColor = 'var(--teal)'; // Unique color for GitHub OAuth accounts
     
     db.get('SELECT * FROM users WHERE github_id = ? OR username = ?', [githubId, username], (err, existingUser) => {
+      // Evict in-memory collaborator cache for this user on new login
+      for (const [key] of collaboratorCache.entries()) {
+        if (key.startsWith(`${username}:`)) {
+          collaboratorCache.delete(key);
+        }
+      }
+      
       const tokenPayload = JSON.stringify({
         username: username,
         expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hour session expiration
