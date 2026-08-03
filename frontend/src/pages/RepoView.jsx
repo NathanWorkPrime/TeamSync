@@ -4,6 +4,7 @@ import BranchMap from '../components/BranchMap';
 import KanbanBoard from '../components/KanbanBoard';
 import Session from './Session';
 import Integrations from './Integrations';
+import GitActionCenter from '../components/GitActionCenter';
 import { 
   GitBranch, 
   FileText, 
@@ -111,11 +112,34 @@ export default function RepoView({
   // Local Git Workspace integration state
   const [activeOperations, setActiveOperations] = useState({}); // { [branchName]: 'status_message' }
   const [localWarningModal, setLocalWarningModal] = useState({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+  const [localGitStatus, setLocalGitStatus] = useState(null);
+  const [companionOnline, setCompanionOnline] = useState(false);
+
+  const fetchLocalGitStatus = async () => {
+    try {
+      const res = await fetch(`http://localhost:37845/git-status?repo=${githubRepo || repoName}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setLocalGitStatus(data.exists ? data : null);
+      setCompanionOnline(true);
+    } catch (err) {
+      setCompanionOnline(false);
+      setLocalGitStatus(null);
+    }
+  };
+
+  useEffect(() => {
+    fetchLocalGitStatus();
+    const interval = setInterval(fetchLocalGitStatus, 5000);
+    return () => clearInterval(interval);
+  }, [repoName, githubRepo]);
 
   // Docs state
   const [docs, setDocs] = useState([]);
   const [docsLoading, setDocsLoading] = useState(true);
   const [selectedDoc, setSelectedDoc] = useState(null);
+  const [deleteBranchModal, setDeleteBranchModal] = useState({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+  const [postMergeCleanupModal, setPostMergeCleanupModal] = useState({ isOpen: false, branchName: '', remember: false });
   const [docSearch, setDocSearch] = useState('');
   const [docTypeFilter, setDocTypeFilter] = useState('');
   const [showNewDocModal, setShowNewDocModal] = useState(false);
@@ -746,6 +770,144 @@ export default function RepoView({
     }
   };
 
+  const triggerDeleteBranch = (branchName) => {
+    setDeleteBranchModal({
+      isOpen: true,
+      branchName,
+      force: false,
+      localOnly: false,
+      remoteOnly: false,
+      isDeleting: false
+    });
+  };
+
+  const handleDeleteBranchConfirm = async () => {
+    setDeleteBranchModal(prev => ({ ...prev, isDeleting: true }));
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: deleteBranchModal.branchName,
+          force: deleteBranchModal.force,
+          localOnly: deleteBranchModal.localOnly,
+          remoteOnly: deleteBranchModal.remoteOnly
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || (data.success === false && !data.requiresForce)) {
+        throw new Error(data.error || data.message || `Server returned ${res.status}`);
+      }
+
+      if (data.requiresForce) {
+        if (window.confirm(`Branch ${deleteBranchModal.branchName} contains unmerged commits. Force delete local branch?`)) {
+          setDeleteBranchModal(prev => ({ ...prev, force: true, isDeleting: false }));
+          setTimeout(() => {
+            executeDeleteBranchWithForce(deleteBranchModal.branchName, deleteBranchModal.localOnly, deleteBranchModal.remoteOnly);
+          }, 100);
+          return;
+        } else {
+          setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+          return;
+        }
+      }
+
+      alert(`Successfully deleted branch ${deleteBranchModal.branchName}.`);
+      setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+      
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Delete Branch] Error:', err);
+      alert(`Failed to delete branch: ${err.message}`);
+      setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+    }
+  };
+
+  const executeDeleteBranchWithForce = async (branchName, localOnly, remoteOnly) => {
+    setDeleteBranchModal(prev => ({ ...prev, isDeleting: true, force: true }));
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: branchName,
+          force: true,
+          localOnly,
+          remoteOnly
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || data.message || `Server returned ${res.status}`);
+      }
+
+      alert(`Successfully force deleted branch ${branchName}.`);
+      setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Force Delete Branch] Error:', err);
+      alert(`Failed to delete branch: ${err.message}`);
+      setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+    }
+  };
+
+  const handleMergeSuccess = (sourceBranch) => {
+    projectCache.clearCache(repoName, 'branches');
+    projectCache.clearCache(repoName, 'sessions');
+    
+    fetchBranches();
+    fetchLocalGitStatus();
+
+    const pref = localStorage.getItem('teamsync_post_merge_delete_pref');
+    if (pref === 'always') {
+      executePostMergeCleanup(sourceBranch);
+    } else if (pref !== 'never') {
+      setPostMergeCleanupModal({
+        isOpen: true,
+        branchName: sourceBranch,
+        remember: false
+      });
+    } else {
+      alert(`Merge completed successfully on ${sourceBranch}!`);
+    }
+  };
+
+  const executePostMergeCleanup = async (branchName) => {
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: branchName,
+          force: true
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(`Successfully cleaned up and deleted merged branch ${branchName} locally and remotely.`);
+      } else {
+        alert(`Merge succeeded, but post-merge branch cleanup failed: ${data.error || data.message || 'Unknown error'}`);
+      }
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Post-Merge Cleanup] Error:', err);
+    }
+  };
+
   const handleRollback = (deployment) => {
     setRollbackTarget(deployment);
   };
@@ -850,6 +1012,14 @@ export default function RepoView({
             );
           })}
         </div>
+
+        <GitActionCenter
+          repoName={repoName}
+          githubRepo={githubRepo}
+          status={localGitStatus}
+          companionOnline={companionOnline}
+          onRefreshStatus={fetchLocalGitStatus}
+        />
       </div>
 
       {/* Main Content Area */}
@@ -1153,6 +1323,11 @@ export default function RepoView({
                 loading={!branches || branches.length === 0}
                 activeOperations={activeOperations}
                 onViewLocally={handleViewLocally}
+                onDeleteBranch={triggerDeleteBranch}
+                fetchBranches={fetchBranches}
+                onMergeSuccess={handleMergeSuccess}
+                companionOnline={companionOnline}
+                localGitStatus={localGitStatus}
               />
             </div>
           )}
@@ -2366,6 +2541,132 @@ export default function RepoView({
                 style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', background: 'var(--teal)', borderColor: 'var(--teal)' }}
               >
                 Stash & Switch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Branch Deletion Modal */}
+      {deleteBranchModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '460px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--red)', margin: 0 }}>
+              🗑️ Delete Branch
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
+              Are you sure you want to delete branch <strong className="mono" style={{ color: 'var(--teal)' }}>{deleteBranchModal.branchName}</strong>?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(0,0,0,0.15)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                <input 
+                  type="checkbox" 
+                  checked={!deleteBranchModal.remoteOnly}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, localOnly: !e.target.checked ? false : prev.localOnly, remoteOnly: !e.target.checked ? true : false }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Delete branch locally</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                <input 
+                  type="checkbox" 
+                  checked={!deleteBranchModal.localOnly}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, remoteOnly: !e.target.checked ? false : prev.remoteOnly, localOnly: !e.target.checked ? true : false }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Delete remote branch (origin/{deleteBranchModal.branchName})</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '4px', color: deleteBranchModal.force ? 'var(--red)' : 'var(--text-dim)' }}>
+                <input 
+                  type="checkbox" 
+                  checked={deleteBranchModal.force}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, force: e.target.checked }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Force delete (discard unmerged changes)</span>
+              </label>
+            </div>
+
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false })}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+                disabled={deleteBranchModal.isDeleting}
+              >
+                Cancel
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={handleDeleteBranchConfirm}
+                style={{ padding: '8px 16px', fontSize: '13px', backgroundColor: 'var(--red)', borderColor: 'var(--red)', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                disabled={deleteBranchModal.isDeleting}
+              >
+                {deleteBranchModal.isDeleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post-Merge Cleanup Modal */}
+      {postMergeCleanupModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '460px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--teal)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              ✨ Merge Completed Successfully!
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
+              The feature branch <strong className="mono" style={{ color: 'var(--teal)' }}>{postMergeCleanupModal.branchName}</strong> has been successfully merged.
+              Would you like to clean up and delete its local and remote copies?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-dim)' }}>
+                <input 
+                  type="checkbox" 
+                  checked={postMergeCleanupModal.remember}
+                  onChange={(e) => setPostMergeCleanupModal(prev => ({ ...prev, remember: e.target.checked }))}
+                />
+                <span>Remember this preference in the future (always delete)</span>
+              </label>
+            </div>
+
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  if (postMergeCleanupModal.remember) {
+                    localStorage.setItem('teamsync_post_merge_delete_pref', 'never');
+                  }
+                  setPostMergeCleanupModal({ isOpen: false, branchName: '', remember: false });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Keep Branch
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={async () => {
+                  if (postMergeCleanupModal.remember) {
+                    localStorage.setItem('teamsync_post_merge_delete_pref', 'always');
+                  }
+                  const branchToClean = postMergeCleanupModal.branchName;
+                  setPostMergeCleanupModal({ isOpen: false, branchName: '', remember: false });
+                  await executePostMergeCleanup(branchToClean);
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', backgroundColor: 'var(--teal)', borderColor: 'var(--teal)', cursor: 'pointer' }}
+              >
+                Clean Up Branch
               </button>
             </div>
           </div>

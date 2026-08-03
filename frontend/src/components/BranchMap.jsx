@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import GitActionCenter from './GitActionCenter';
 import { 
   AlertTriangle, 
   GitPullRequest, 
@@ -17,7 +18,8 @@ import {
   Server,
   AlertCircle,
   Lock,
-  Monitor
+  Monitor,
+  Trash2
 } from 'lucide-react';
 
 export default function BranchMap({ 
@@ -29,7 +31,12 @@ export default function BranchMap({
   githubRepo,
   loading,
   activeOperations = {},
-  onViewLocally
+  onViewLocally,
+  onDeleteBranch,
+  fetchBranches,
+  onMergeSuccess,
+  companionOnline,
+  localGitStatus
 }) {
   const getHeaders = (extraHeaders = {}) => {
     const cached = localStorage.getItem('teamsync_current_user');
@@ -310,7 +317,7 @@ export default function BranchMap({
         }, 5000);
 
         // Reload local page context
-        window.location.reload();
+        if (onMergeSuccess) onMergeSuccess(sourceBranch);
       }
     } catch (err) {
       console.error('[BranchMap] Merge failed:', err);
@@ -373,7 +380,7 @@ export default function BranchMap({
       }, 5000);
 
       // Refresh view
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
 
     } catch (err) {
       console.error('[BranchMap] Get Local failed:', err);
@@ -433,7 +440,7 @@ export default function BranchMap({
         }));
       }, 5000);
 
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
 
     } catch (err) {
       console.error('[BranchMap] Pull failed:', err);
@@ -493,7 +500,7 @@ export default function BranchMap({
         }));
       }, 5000);
 
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
 
     } catch (err) {
       console.error('[BranchMap] Push failed:', err);
@@ -551,7 +558,7 @@ export default function BranchMap({
       }
       
       // Force reload to sync branches and retrieve new PR
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
     } catch (err) {
       console.error('[BranchMap] Create PR failed:', err);
       alert(err.message);
@@ -602,7 +609,7 @@ export default function BranchMap({
         [sourceBranch]: { status: 'success', target: mergeTarget }
       }));
       setTimeout(() => {
-        window.location.reload();
+        if (onMergeSuccess) onMergeSuccess(sourceBranch);
       }, 2000);
     } catch (err) {
       console.error('[BranchMap] Merge PR failed:', err);
@@ -654,7 +661,7 @@ export default function BranchMap({
       if (res.ok) {
         setNewBranchName('');
         setShowCreateBranchModal(false);
-        window.location.reload();
+        if (fetchBranches) fetchBranches();
       } else {
         const errData = await res.json();
         setCreateBranchError(errData.error || 'Failed to create branch.');
@@ -892,6 +899,32 @@ export default function BranchMap({
                 <span style={{ fontSize: '9px', fontWeight: 600, color: 'var(--violet)', background: 'rgba(139,92,246,0.08)', padding: '2px 8px', borderRadius: '12px', border: '1px solid rgba(139,92,246,0.15)' }} title={`${node.localBehind} commits behind remote`}>
                   ↓ {node.localBehind}
                 </span>
+              )}
+              
+              {!isCurrent && !node.isMain && !node.isProtected && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onDeleteBranch) onDeleteBranch(node.name);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'color 0.15s ease',
+                    marginLeft: '4px'
+                  }}
+                  onMouseOver={(e) => e.currentTarget.style.color = 'var(--red)'}
+                  onMouseOut={(e) => e.currentTarget.style.color = 'var(--text-dim)'}
+                  title={`Delete branch ${node.name}`}
+                >
+                  <Trash2 size={13} />
+                </button>
               )}
             </div>
           </div>
@@ -1132,8 +1165,20 @@ export default function BranchMap({
                       {isCurrentUserOnBranch(selectedBranchData.name) ? 'In session' : 'Work on this'}
                     </button>
                   )}
-                  
-                  {(() => {
+
+                  {companionOnline && (
+                    <GitActionCenter
+                      repoName={repoName}
+                      githubRepo={githubRepo}
+                      status={localGitStatus}
+                      companionOnline={companionOnline}
+                      onRefreshStatus={fetchBranches}
+                      variant="button"
+                      branchName={selectedBranchData.name}
+                    />
+                  )}
+                
+                {(() => {
                     const state = cloneStates[selectedBranchData.name] || { status: 'idle' };
                     const pullState = pullStates[selectedBranchData.name] || { status: 'idle' };
                     const pushState = pushStates[selectedBranchData.name] || { status: 'idle' };

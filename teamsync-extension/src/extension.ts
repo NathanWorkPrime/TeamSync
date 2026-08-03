@@ -352,6 +352,449 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  // GET /git-status - Get comprehensive local git status
+  app.get('/git-status', async (req: express.Request, res: express.Response) => {
+    const repo = req.query.repo as string;
+
+    if (!repo) {
+      res.status(400).json({ error: 'Repository name is required.' });
+      return;
+    }
+
+    try {
+      // Resolve path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      if (!baseDir) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const rootPath = workspaceFolders[0].uri.fsPath;
+          const parentPath = path.dirname(rootPath);
+          if (fs.existsSync(parentPath)) {
+            baseDir = parentPath;
+          }
+        }
+      }
+
+      if (!baseDir) {
+        const parentPath = path.resolve(__dirname, '../../../');
+        if (fs.existsSync(parentPath) && fs.existsSync(path.join(parentPath, 'TeamDash'))) {
+          baseDir = parentPath;
+        }
+      }
+
+      if (!baseDir) {
+        res.json({ exists: false, message: 'No base path configured' });
+        return;
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (repoBasename === 'TeamSync') {
+        const activeDashFolder = workspaceFolders?.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        } else {
+          const altDir = path.join(baseDir, 'TeamDash');
+          if (fs.existsSync(altDir)) {
+            targetDir = altDir;
+          }
+        }
+      }
+
+      if (!fs.existsSync(targetDir)) {
+        res.json({ exists: false });
+        return;
+      }
+
+      if (!fs.existsSync(path.join(targetDir, '.git'))) {
+        res.json({ exists: true, isGit: false, path: targetDir });
+        return;
+      }
+
+      // Check Git stats
+      let currentBranch = '';
+      try {
+        const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+        currentBranch = branchOut.stdout.trim();
+      } catch (e) {}
+
+      let currentCommitHash = '';
+      let currentCommitMessage = '';
+      try {
+        const logRes = await runCmd('git log -1 --format=%H%n%s', targetDir);
+        const logParts = logRes.stdout.trim().split('\n');
+        currentCommitHash = logParts[0] || '';
+        currentCommitMessage = logParts[1] || '';
+      } catch (e) {}
+
+      let activeRemote = '';
+      try {
+        const remoteRes = await runCmd('git remote get-url origin', targetDir);
+        activeRemote = remoteRes.stdout.trim();
+      } catch (e) {}
+
+      // Working Tree Status (staged, modified, untracked)
+      let stagedFiles: string[] = [];
+      let modifiedFiles: string[] = [];
+      let untrackedFiles: string[] = [];
+      let isClean = true;
+
+      try {
+        const statusOut = await runCmd('git status --porcelain', targetDir);
+        const lines = statusOut.stdout.split('\n');
+        for (const line of lines) {
+          if (line.length < 3) continue;
+          const status = line.slice(0, 2);
+          const file = line.slice(3).trim();
+          isClean = false;
+
+          if (status === '??') {
+            untrackedFiles.push(file);
+          } else {
+            if (status[0] !== ' ' && status[0] !== '?') {
+              stagedFiles.push(file);
+            }
+            if (status[1] !== ' ' && status[1] !== '?') {
+              modifiedFiles.push(file);
+            }
+          }
+        }
+      } catch (e) {}
+
+      // Ahead/Behind count and upstream tracking status
+      let aheadCount = 0;
+      let behindCount = 0;
+      let upstreamTrackingMissing = false;
+      try {
+        const revRes = await runCmd('git rev-list --left-right --count HEAD...@{u}', targetDir);
+        const parts = revRes.stdout.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          aheadCount = parseInt(parts[0], 10) || 0;
+          behindCount = parseInt(parts[1], 10) || 0;
+        }
+      } catch (e: any) {
+        if (e.message.includes('no upstream') || e.message.includes('no tracking info') || e.message.includes('fatal:')) {
+          upstreamTrackingMissing = true;
+        }
+      }
+
+      // Detached head check
+      let detachedHead = false;
+      try {
+        const headRes = await runCmd('git symbolic-ref -q HEAD', targetDir);
+        if (headRes.stdout.trim() === '') {
+          detachedHead = true;
+        }
+      } catch (e) {
+        detachedHead = true;
+      }
+
+      // Repo Health: check for active states (merge, rebase, cherry-pick)
+      const mergeState = fs.existsSync(path.join(targetDir, '.git', 'MERGE_HEAD'));
+      const rebaseState = fs.existsSync(path.join(targetDir, '.git', 'rebase-merge')) || fs.existsSync(path.join(targetDir, '.git', 'rebase-apply'));
+      const cherryPickState = fs.existsSync(path.join(targetDir, '.git', 'CHERRY_PICK_HEAD'));
+      const revertState = fs.existsSync(path.join(targetDir, '.git', 'REVERT_HEAD'));
+
+      // Branches list
+      let localBranches: string[] = [];
+      let remoteBranches: string[] = [];
+      try {
+        const branchesRes = await runCmd('git branch -a --format=%(refname:short)', targetDir);
+        const lines = branchesRes.stdout.split('\n');
+        for (let line of lines) {
+          line = line.trim();
+          if (!line) continue;
+          if (line.startsWith('remotes/')) {
+            const cleanRemote = line.replace('remotes/', '');
+            if (!cleanRemote.includes('HEAD')) {
+              remoteBranches.push(cleanRemote);
+            }
+          } else {
+            localBranches.push(line);
+          }
+        }
+      } catch (e) {}
+
+      // Retrieve timestamps from VS Code globalState
+      const fetchKey = `last-fetch:${repo}`;
+      const pullKey = `last-pull:${repo}`;
+      const pushKey = `last-push:${repo}`;
+
+      const lastFetch = context.globalState.get<string>(fetchKey) || '';
+      const lastPull = context.globalState.get<string>(pullKey) || '';
+      const lastPush = context.globalState.get<string>(pushKey) || '';
+
+      res.json({
+        exists: true,
+        isGit: true,
+        path: targetDir,
+        currentBranch,
+        currentCommitHash,
+        currentCommitMessage,
+        activeRemote,
+        isClean,
+        stagedFilesCount: stagedFiles.length,
+        stagedFiles,
+        modifiedFilesCount: modifiedFiles.length,
+        modifiedFiles,
+        untrackedFilesCount: untrackedFiles.length,
+        untrackedFiles,
+        aheadCount,
+        behindCount,
+        upstreamTrackingMissing,
+        detachedHead,
+        mergeState,
+        rebaseState,
+        cherryPickState,
+        revertState,
+        localBranches,
+        remoteBranches,
+        lastFetch,
+        lastPull,
+        lastPush
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /git-action - Execute Git operations on local workspace
+  app.post('/git-action', async (req: express.Request, res: express.Response) => {
+    const { action, repo, branch, force, localOnly, remoteOnly } = req.body;
+
+    if (!repo || !action) {
+      res.status(400).json({ error: 'Repository name and Git action are required.' });
+      return;
+    }
+
+    try {
+      // Resolve path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      if (!baseDir) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const rootPath = workspaceFolders[0].uri.fsPath;
+          const parentPath = path.dirname(rootPath);
+          if (fs.existsSync(parentPath)) {
+            baseDir = parentPath;
+          }
+        }
+      }
+
+      if (!baseDir) {
+        const parentPath = path.resolve(__dirname, '../../../');
+        if (fs.existsSync(parentPath) && fs.existsSync(path.join(parentPath, 'TeamDash'))) {
+          baseDir = parentPath;
+        }
+      }
+
+      if (!baseDir) {
+        res.status(400).json({ error: 'Repository local directory not configured.' });
+        return;
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (repoBasename === 'TeamSync') {
+        const activeDashFolder = workspaceFolders?.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        } else {
+          const altDir = path.join(baseDir, 'TeamDash');
+          if (fs.existsSync(altDir)) {
+            targetDir = altDir;
+          }
+        }
+      }
+
+      if (!fs.existsSync(targetDir) || !fs.existsSync(path.join(targetDir, '.git'))) {
+        res.status(404).json({ error: 'Local Git repository not found.' });
+        return;
+      }
+
+      let log = '';
+      const runLogCmd = async (cmd: string) => {
+        log += `> ${cmd}\n`;
+        const resOut = await runCmd(cmd, targetDir);
+        if (resOut.stdout) log += `${resOut.stdout}\n`;
+        if (resOut.stderr) log += `${resOut.stderr}\n`;
+        return resOut;
+      };
+
+      const fetchKey = `last-fetch:${repo}`;
+      const pullKey = `last-pull:${repo}`;
+      const pushKey = `last-push:${repo}`;
+
+      if (action === 'fetch') {
+        await runLogCmd('git fetch origin');
+        await context.globalState.update(fetchKey, new Date().toISOString());
+        res.json({ success: true, log, message: 'Successfully fetched remote repository updates.' });
+        return;
+      } 
+      
+      if (action === 'pull') {
+        const targetBranch = branch || 'main';
+        await runLogCmd('git fetch origin');
+        await gitCheckoutAndSync(targetDir, targetBranch);
+        await runLogCmd(`git pull origin ${targetBranch}`);
+        await context.globalState.update(pullKey, new Date().toISOString());
+        res.json({ success: true, log, message: `Successfully pulled latest changes on ${targetBranch}.` });
+        return;
+      } 
+      
+      if (action === 'push') {
+        const targetBranch = branch || 'main';
+        await gitCheckoutAndSync(targetDir, targetBranch);
+        
+        // Check if remote upstream tracking exists
+        let hasUpstream = false;
+        try {
+          const trackingRes = await runCmd(`git rev-parse --abbrev-ref ${targetBranch}@{u}`, targetDir);
+          if (trackingRes.stdout.trim()) hasUpstream = true;
+        } catch (e) {}
+
+        if (hasUpstream) {
+          await runLogCmd(`git push origin ${targetBranch}`);
+        } else {
+          await runLogCmd(`git push -u origin ${targetBranch}`);
+        }
+        await context.globalState.update(pushKey, new Date().toISOString());
+        res.json({ success: true, log, message: `Successfully pushed commits to origin/${targetBranch}.` });
+        return;
+      } 
+      
+      if (action === 'sync') {
+        const targetBranch = branch || 'main';
+        await runLogCmd('git fetch origin');
+        await context.globalState.update(fetchKey, new Date().toISOString());
+        
+        // Checkout target branch
+        await gitCheckoutAndSync(targetDir, targetBranch);
+
+        // Check if ahead/behind
+        let aheadCount = 0;
+        let behindCount = 0;
+        let hasUpstream = false;
+        try {
+          const revRes = await runCmd(`git rev-list --left-right --count HEAD...origin/${targetBranch}`, targetDir);
+          const parts = revRes.stdout.trim().split(/\s+/);
+          if (parts.length >= 2) {
+            aheadCount = parseInt(parts[0], 10) || 0;
+            behindCount = parseInt(parts[1], 10) || 0;
+          }
+          hasUpstream = true;
+        } catch (e) {}
+
+        if (behindCount > 0) {
+          await runLogCmd(`git pull origin ${targetBranch}`);
+          await context.globalState.update(pullKey, new Date().toISOString());
+        } else {
+          log += `Already up-to-date with remote branch (0 commits behind).\n`;
+        }
+
+        if (aheadCount > 0 || !hasUpstream) {
+          if (hasUpstream) {
+            await runLogCmd(`git push origin ${targetBranch}`);
+          } else {
+            await runLogCmd(`git push -u origin ${targetBranch}`);
+          }
+          await context.globalState.update(pushKey, new Date().toISOString());
+        } else {
+          log += `Already up-to-date with remote branch (0 commits ahead).\n`;
+        }
+
+        res.json({ success: true, log, message: `Successfully synchronized ${targetBranch} with remote.` });
+        return;
+      } 
+      
+      if (action === 'stash') {
+        await runLogCmd('git stash -u');
+        res.json({ success: true, log, message: 'Successfully stashed local modifications (including untracked files).' });
+        return;
+      } 
+      
+      if (action === 'delete-branch') {
+        const targetBranch = branch;
+        if (!targetBranch) {
+          res.status(400).json({ error: 'Branch name is required for deletion.' });
+          return;
+        }
+
+        // Detect currently checked out branch
+        let currentBranchName = '';
+        try {
+          const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+          currentBranchName = branchOut.stdout.trim();
+        } catch (e) {}
+
+        if (targetBranch === currentBranchName) {
+          res.status(400).json({ error: 'Cannot delete the currently checked-out branch.' });
+          return;
+        }
+
+        let localSuccess = false;
+        let remoteSuccess = false;
+
+        if (!remoteOnly) {
+          try {
+            // Try standard delete
+            const delCmd = force ? `git branch -D ${targetBranch}` : `git branch -d ${targetBranch}`;
+            await runLogCmd(delCmd);
+            localSuccess = true;
+          } catch (delErr: any) {
+            if (delErr.message.includes('not fully merged')) {
+              res.json({
+                success: false,
+                requiresForce: true,
+                message: `Branch ${targetBranch} is not fully merged. Force delete required.`,
+                log
+              });
+              return;
+            }
+            throw delErr;
+          }
+        }
+
+        if (remoteOnly || (!localOnly && localSuccess)) {
+          try {
+            await runLogCmd(`git push origin --delete ${targetBranch}`);
+            remoteSuccess = true;
+          } catch (remoteErr: any) {
+            console.warn(`[TeamSync Companion] Remote branch deletion failed:`, remoteErr.message);
+            log += `Remote deletion failed: ${remoteErr.message}\n`;
+          }
+        }
+
+        res.json({
+          success: true,
+          log,
+          localSuccess,
+          remoteSuccess,
+          message: `Branch ${targetBranch} deleted successfully.`
+        });
+        return;
+      }
+
+      res.status(400).json({ error: `Unknown Git action: ${action}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // GET /commands - Inspect registered IDE commands
   app.get('/commands', async (req: express.Request, res: express.Response) => {
     try {
