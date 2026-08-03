@@ -307,7 +307,7 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
   }
   
   try {
-    const token = process.env.GITHUB_PAT || userToken;
+    const token = userToken || process.env.GITHUB_PAT;
     if (!token) {
       return false;
     }
