@@ -336,6 +336,64 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
   }
 }
 
+// Middleware to authorize write actions on a specific repository
+async function authorizeRepoWriteAccess(req, res, next) {
+  const repoName = req.params.repo || req.params.name || req.body.repo_name || req.body.repo;
+  const user = req.user;
+
+  if (!user) {
+    return res.status(401).json({ error: 'Authentication required. Please log in.' });
+  }
+
+  if (!repoName) {
+    return res.status(400).json({ error: 'Repository parameter is missing.' });
+  }
+
+  db.get("SELECT * FROM repositories WHERE name = ?", [repoName], async (err, repo) => {
+    if (err || !repo) {
+      return res.status(404).json({ error: `Repository '${repoName}' not found.` });
+    }
+
+    // Organization isolation check
+    if (user.organization_id && user.organization_id !== repo.organization_id) {
+      return res.status(403).json({ error: 'Access denied: Repository belongs to a different organization.' });
+    }
+
+    // Local-only repos are visible and writable by everyone in the organization
+    if (!repo.github_repo) {
+      req.repo = repo;
+      return next();
+    }
+
+    // Local bypass users (with no GitHub token) have write access
+    if (!user.github_token) {
+      req.repo = repo;
+      return next();
+    }
+
+    // Decrypt user token for check
+    const encryption = require('./services/encryption');
+    const decryptedToken = encryption.decrypt(user.github_token);
+    if (!decryptedToken) {
+      return res.status(403).json({ error: 'Access denied: Invalid GitHub token credentials.' });
+    }
+
+    try {
+      // Verify collaborator access on GitHub
+      const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
+      if (!hasAccess) {
+        return res.status(403).json({ error: `Access denied: You do not have collaborator access to repository '${repoName}' on GitHub.` });
+      }
+      
+      req.repo = repo;
+      next();
+    } catch (apiErr) {
+      console.error(`[Auth] Failed to verify collaborator access for write action:`, apiErr.message);
+      return res.status(503).json({ error: 'GitHub Verification Error', message: 'Could not verify repository permissions.' });
+    }
+  });
+}
+
 function isGitHubOAuthConfigured() {
   return {
     configured: !!(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET)
@@ -682,7 +740,7 @@ app.post('/api/repos/join', (req, res) => {
 });
 
 // DELETE /api/repos/:name - Unregister a repository
-app.delete('/api/repos/:name', (req, res) => {
+app.delete('/api/repos/:name', authorizeRepoWriteAccess, (req, res) => {
   const repoName = req.params.name;
   
   db.run(`DELETE FROM repositories WHERE name = ?`, [repoName], function(err) {
@@ -1775,7 +1833,7 @@ app.get('/api/repos/:repo/deployments', (req, res) => {
 });
 
 // POST /api/repos/:repo/branches - Create a new branch
-app.post('/api/repos/:repo/branches', async (req, res) => {
+app.post('/api/repos/:repo/branches', authorizeRepoWriteAccess, async (req, res) => {
   const repoName = req.params.repo;
   const { branch_name, base_branch } = req.body;
 
@@ -1834,7 +1892,7 @@ app.get('/api/repos/:repo/deploy/status', (req, res) => {
 });
 
 // POST /api/repos/:repo/deploy - Perform local Node deployment on port 5001
-app.post('/api/repos/:repo/deploy', async (req, res) => {
+app.post('/api/repos/:repo/deploy', authorizeRepoWriteAccess, async (req, res) => {
   const repoName = req.params.repo;
   const { branch_name, user_id, commit_hash } = req.body;
 
@@ -1947,7 +2005,7 @@ app.post('/api/repos/:repo/deploy', async (req, res) => {
 });
 
 // POST /api/repos/:repo/pulls - Create Pull Request on GitHub
-app.post('/api/repos/:repo/pulls', async (req, res) => {
+app.post('/api/repos/:repo/pulls', authorizeRepoWriteAccess, async (req, res) => {
   const repoName = req.params.repo;
   const { sourceBranch, targetBranch, title, body } = req.body;
   try {
@@ -1973,7 +2031,7 @@ app.get('/api/repos/:repo/pulls/:number', async (req, res) => {
 });
 
 // POST /api/repos/:repo/pulls/:number/approve - Approve Pull Request (GitHub or Simulated)
-app.post('/api/repos/:repo/pulls/:number/approve', async (req, res) => {
+app.post('/api/repos/:repo/pulls/:number/approve', authorizeRepoWriteAccess, async (req, res) => {
   const repoName = req.params.repo;
   const prNumber = parseInt(req.params.number, 10);
   try {
@@ -1986,7 +2044,7 @@ app.post('/api/repos/:repo/pulls/:number/approve', async (req, res) => {
 });
 
 // POST /api/repos/:repo/pulls/:number/merge - Merge Pull Request on GitHub
-app.post('/api/repos/:repo/pulls/:number/merge', async (req, res) => {
+app.post('/api/repos/:repo/pulls/:number/merge', authorizeRepoWriteAccess, async (req, res) => {
   const repoName = req.params.repo;
   const prNumber = parseInt(req.params.number, 10);
   try {
@@ -2151,7 +2209,7 @@ app.get('/api/repos/:repo/branches/:branch/changelog', (req, res) => {
 });
 
 // POST /api/repos/:repo/branches/:branch/changelog - Post a manual changelog entry
-app.post('/api/repos/:repo/branches/:branch/changelog', (req, res) => {
+app.post('/api/repos/:repo/branches/:branch/changelog', authorizeRepoWriteAccess, (req, res) => {
   const { repo, branch } = req.params;
   const { content, author_user_id } = req.body;
   
@@ -2209,7 +2267,7 @@ app.get('/api/deployments', (req, res) => {
 
 
 // POST /api/deployments - Register a new deployment and broadcast it
-app.post('/api/deployments', async (req, res) => {
+app.post('/api/deployments', authorizeRepoWriteAccess, async (req, res) => {
   const { repo_name, branch_name, user_id, commit_hash, status, is_rollback } = req.body;
   if (!repo_name || !branch_name) {
     return res.status(400).json({ error: 'Repository name and branch name are required.' });
@@ -2463,7 +2521,7 @@ app.get('/api/repos/:repo/tasks', (req, res) => {
 });
 
 // POST /api/repos/:repo/tasks - Create a new task
-app.post('/api/repos/:repo/tasks', (req, res) => {
+app.post('/api/repos/:repo/tasks', authorizeRepoWriteAccess, (req, res) => {
   const repoName = req.params.repo;
   const { title, description, status, priority, assignee_user_id } = req.body;
   if (!title) {
