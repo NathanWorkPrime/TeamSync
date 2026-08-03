@@ -31,7 +31,7 @@ try {
 
     Write-Host "[Deploy] 4. Reloading Caddy configuration..." -ForegroundColor Cyan
     Set-Location -Path "C:\var\www\teamsync"
-    caddy reload --config C:\var\www\teamsync\Caddyfile
+    .\caddy.exe reload --config C:\var\www\teamsync\Caddyfile
 
     Write-Host "`n[Deploy] 5. Deployment completed successfully!" -ForegroundColor Green
     Write-Host "------------------------------------------------" -ForegroundColor Gray
