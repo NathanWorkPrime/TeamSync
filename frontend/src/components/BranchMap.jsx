@@ -25,7 +25,8 @@ export default function BranchMap({
   activePresence, 
   currentUser, 
   repoName, 
-  githubRepo 
+  githubRepo,
+  loading
 }) {
   const getHeaders = (extraHeaders = {}) => {
     const cached = localStorage.getItem('teamsync_current_user');
@@ -941,6 +942,10 @@ export default function BranchMap({
       </div>
     );
   };
+
+  if (loading && branches.length === 0) {
+    return <BranchMapSkeleton />;
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '24px', flexGrow: 1, height: '100%', minHeight: '520px', position: 'relative' }}>
@@ -2061,3 +2066,53 @@ export default function BranchMap({
     </div>
   );
 }
+
+const BranchMapSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '24px', flexGrow: 1, height: '100%', minHeight: '520px' }}>
+    {/* Sync Header Panel */}
+    <div className="panel" style={{ margin: 0, padding: '20px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px' }}>
+      <div style={{ display: 'flex', justifySelf: 'stretch', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div className="skeleton" style={{ height: '16px', width: '260px', borderRadius: '4px', marginBottom: '8px' }} />
+          <div className="skeleton" style={{ height: '12px', width: '180px', borderRadius: '4px' }} />
+        </div>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <div className="skeleton" style={{ height: '28px', width: '140px', borderRadius: '8px' }} />
+          <div className="skeleton" style={{ height: '28px', width: '110px', borderRadius: '8px' }} />
+        </div>
+      </div>
+    </div>
+
+    {/* Tree & Details Grid */}
+    <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '24px', flexGrow: 1, minHeight: 0 }}>
+      {/* Sidebar Tree Skeleton */}
+      <div className="panel" style={{ margin: 0, padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div className="skeleton" style={{ height: '16px', width: '100px', borderRadius: '4px' }} />
+          <div className="skeleton" style={{ height: '20px', width: '80px', borderRadius: '6px' }} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {[1, 2, 3, 4].map(n => (
+            <div key={n} style={{ display: 'flex', gap: '8px', alignItems: 'center', paddingLeft: `${(n - 1) * 12}px` }}>
+              <div className="skeleton" style={{ height: '12px', width: '12px', borderRadius: '3px' }} />
+              <div className="skeleton" style={{ height: '14px', width: '100px', borderRadius: '4px' }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Details Card Skeleton */}
+      <div className="panel" style={{ margin: 0, padding: '20px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: '16px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div className="skeleton" style={{ height: '20px', width: '180px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '120px', borderRadius: '4px' }} />
+          </div>
+          <div className="skeleton" style={{ height: '36px', width: '110px', borderRadius: '6px' }} />
+        </div>
+        <div className="skeleton" style={{ height: '80px', width: '100%', borderRadius: '8px' }} />
+        <div className="skeleton" style={{ height: '120px', width: '100%', borderRadius: '8px' }} />
+      </div>
+    </div>
+  </div>
+);
+

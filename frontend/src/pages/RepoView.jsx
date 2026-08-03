@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { projectCache } from '../utils/projectCache';
 import BranchMap from '../components/BranchMap';
 import KanbanBoard from '../components/KanbanBoard';
 import Session from './Session';
@@ -33,6 +34,7 @@ export default function RepoView({
   users, 
   activePresence, 
   currentUser, 
+  fetchBranches,
   onWorkOnBranch, 
   onAddTicket, 
   onUpdateTicketStatus,
@@ -65,9 +67,25 @@ export default function RepoView({
     return headers;
   };
 
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [visitedTabs, setVisitedTabs] = useState({ sessions: true }); // Default tab
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsInitializing(false);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, []);
+
   const [localSubTab, setLocalSubTab] = useState('sessions');
   const subTab = propsSubTab !== undefined ? propsSubTab : localSubTab;
   const setSubTab = onTabChange !== undefined ? onTabChange : setLocalSubTab;
+
+  const handleTabClick = (tabId) => {
+    setSubTab(tabId);
+    setVisitedTabs(prev => ({ ...prev, [tabId]: true }));
+  };
+
   const [showNewTicketModal, setShowNewTicketModal] = useState(false);
   const [selectedTicket, setSelectedTicket] = useState(null);
   
@@ -135,12 +153,20 @@ export default function RepoView({
   // Fetch overview data
   const fetchOverviewData = async () => {
     try {
+      if (overview === null) {
+        const cached = projectCache.getTabData(repoName, 'overview');
+        if (cached) {
+          setOverview(cached);
+          setOverviewLoading(false);
+        }
+      }
       const res = await fetch(`/api/repos/${repoName}/overview`, {
         headers: getHeaders()
       });
       if (res.ok) {
         const data = await res.json();
         setOverview(data);
+        projectCache.setTabData(repoName, 'overview', data);
       }
     } catch (err) {
       console.error('Error fetching repo overview:', err);
@@ -152,6 +178,13 @@ export default function RepoView({
   // Fetch documents
   const fetchDocs = async () => {
     try {
+      if (docs.length === 0 && !docSearch && !docTypeFilter) {
+        const cached = projectCache.getTabData(repoName, 'docs');
+        if (cached) {
+          setDocs(cached);
+          setDocsLoading(false);
+        }
+      }
       let url = `/api/docs?repo_name=${repoName}`;
       if (docSearch) url += `&search=${encodeURIComponent(docSearch)}`;
       if (docTypeFilter) url += `&doc_type=${docTypeFilter}`;
@@ -162,6 +195,9 @@ export default function RepoView({
       if (res.ok) {
         const data = await res.json();
         setDocs(data);
+        if (!docSearch && !docTypeFilter) {
+          projectCache.setTabData(repoName, 'docs', data);
+        }
         // If a document is selected, refresh its content in details panel
         if (selectedDoc) {
           const refreshed = data.find(d => d.id === selectedDoc.id);
@@ -182,12 +218,20 @@ export default function RepoView({
   // Fetch tasks
   const fetchTasks = async () => {
     try {
+      if (tasks.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'tasks');
+        if (cached) {
+          setTasks(cached);
+          setTasksLoading(false);
+        }
+      }
       const res = await fetch(`/api/repos/${repoName}/tasks`, {
         headers: getHeaders()
       });
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
+        projectCache.setTabData(repoName, 'tasks', data);
       }
     } catch (err) {
       console.error('Error fetching tasks:', err);
@@ -213,6 +257,7 @@ export default function RepoView({
         })
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'tasks');
         fetchTasks();
         setShowNewTaskModal(false);
         setNewTaskTitle('');
@@ -238,6 +283,7 @@ export default function RepoView({
         body: JSON.stringify(payload)
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'tasks');
         fetchTasks();
       }
     } catch (err) {
@@ -248,12 +294,20 @@ export default function RepoView({
   // Fetch deployments
   const fetchDeployments = async () => {
     try {
+      if (deployments.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'deployments');
+        if (cached) {
+          setDeployments(cached);
+          setDeploymentsLoading(false);
+        }
+      }
       const res = await fetch(`/api/repos/${repoName}/deployments`, {
         headers: getHeaders()
       });
       if (res.ok) {
         const data = await res.json();
         setDeployments(data);
+        projectCache.setTabData(repoName, 'deployments', data);
       }
     } catch (err) {
       console.error('Error fetching deployments:', err);
@@ -291,6 +345,7 @@ export default function RepoView({
         })
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'deployments');
         await fetchDeployments();
         setTimeout(fetchDeployStatus, 2000);
       } else {
@@ -305,12 +360,20 @@ export default function RepoView({
   // Fetch session rooms history
   const fetchSessionHistory = async () => {
     try {
+      if (sessionHistory.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'sessions');
+        if (cached) {
+          setSessionHistory(cached);
+          setSessionHistoryLoading(false);
+        }
+      }
       const res = await fetch(`/api/repos/${repoName}/sessions`, {
         headers: getHeaders()
       });
       if (res.ok) {
         const data = await res.json();
         setSessionHistory(data);
+        projectCache.setTabData(repoName, 'sessions', data);
       }
     } catch (err) {
       console.error('Error fetching session history:', err);
@@ -319,14 +382,14 @@ export default function RepoView({
     }
   };
 
-  // Periodically poll session history when Sessions tab is active
+  // Poll sessions when tab is visited
   useEffect(() => {
-    if (repoName && subTab === 'sessions') {
+    if (repoName && visitedTabs.sessions) {
       fetchSessionHistory();
       const interval = setInterval(fetchSessionHistory, 5000);
       return () => clearInterval(interval);
     }
-  }, [repoName, subTab]);
+  }, [repoName, visitedTabs.sessions]);
 
   // Set default branch for new session selector
   useEffect(() => {
@@ -335,24 +398,51 @@ export default function RepoView({
     }
   }, [branches, selectedStartBranch]);
 
-  // Poll for overview, docs, tasks, and deployments periodically
+  // Poll overview/docs when tab is visited
   useEffect(() => {
-    fetchOverviewData();
-    fetchDocs();
-    fetchTasks();
-    fetchDeployments();
-    fetchDeployStatus();
-
-    const interval = setInterval(() => {
+    if (repoName && visitedTabs.overview) {
       fetchOverviewData();
       fetchDocs();
+      const interval = setInterval(() => {
+        fetchOverviewData();
+        fetchDocs();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.overview, docSearch, docTypeFilter]);
+
+  // Poll tasks when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.tasks) {
       fetchTasks();
+      const interval = setInterval(fetchTasks, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.tasks]);
+
+  // Poll deployments when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.deployments) {
       fetchDeployments();
       fetchDeployStatus();
-    }, 5000);
+      const interval = setInterval(() => {
+        fetchDeployments();
+        fetchDeployStatus();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.deployments]);
 
-    return () => clearInterval(interval);
-  }, [repoName, docSearch, docTypeFilter]);
+  // Poll branches when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.source_control && fetchBranches) {
+      fetchBranches(repoName);
+      const interval = setInterval(() => {
+        fetchBranches(repoName);
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.source_control]);
 
   // Handle ticket submission
   const handleCreateTicketSubmit = (e) => {
@@ -546,6 +636,8 @@ export default function RepoView({
   };
 
   const handleWorkOnBranchWrapper = async (branchName, isJoined) => {
+    projectCache.clearCache(repoName, 'sessions');
+    projectCache.clearCache(repoName, 'branches');
     await onWorkOnBranch(branchName, isJoined);
     if (!isJoined) {
       setActiveSessionBranch(branchName);
@@ -555,6 +647,8 @@ export default function RepoView({
   };
 
   const handleLeaveSessionWrapper = async (roomId) => {
+    projectCache.clearCache(repoName, 'sessions');
+    projectCache.clearCache(repoName, 'branches');
     await onLeaveSession(roomId);
     setActiveSessionBranch(null);
   };
@@ -641,7 +735,7 @@ export default function RepoView({
             return (
               <div
                 key={item.id}
-                onClick={() => setSubTab(item.id)}
+                onClick={() => handleTabClick(item.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -848,14 +942,22 @@ export default function RepoView({
 
         {/* Subview Content Area */}
         <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          {isInitializing ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '28px', width: '100%', padding: '20px 0' }}>
+              <div className="skeleton" style={{ height: '120px', width: '100%', borderRadius: '12px' }} />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
+                <div className="skeleton" style={{ height: '320px', borderRadius: '12px' }} />
+                <div className="skeleton" style={{ height: '320px', borderRadius: '12px' }} />
+              </div>
+            </div>
+          ) : (
+            <>
           
           {/* OVERVIEW SUBVIEW (TONED DOWN) */}
           {subTab === 'overview' && (
             <div className="subview active">
               {overviewLoading ? (
-                <div style={{ color: 'var(--text-dim)', padding: '40px 0', textAlign: 'center' }}>
-                  Loading project metrics...
-                </div>
+                <OverviewSkeleton />
               ) : overview ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '28px' }}>
                   {/* Left Column: Repository details */}
@@ -955,6 +1057,7 @@ export default function RepoView({
                 currentUser={currentUser}
                 repoName={repoName}
                 githubRepo={githubRepo}
+                loading={!branches || branches.length === 0}
               />
             </div>
           )}
@@ -998,7 +1101,7 @@ export default function RepoView({
               </div>
 
               {tasksLoading ? (
-                <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '40px' }}>Loading tasks...</div>
+                <TasksSkeleton />
               ) : (
                 <div style={{ flexGrow: 1, minHeight: 0 }}>
                   <KanbanBoard 
@@ -1058,6 +1161,8 @@ export default function RepoView({
                     embedded={true}
                     onLeaveSession={handleLeaveSessionWrapper}
                   />
+                ) : sessionHistoryLoading ? (
+                  <SessionsSkeleton />
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
                     
@@ -1447,7 +1552,7 @@ export default function RepoView({
                     </div>
 
                     {deploymentsLoading ? (
-                      <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '24px' }}>Loading history...</div>
+                      <DeploymentsSkeleton />
                     ) : deployments.length === 0 ? (
                       <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '24px', fontSize: '13px', fontStyle: 'italic', lineHeight: 1.5 }}>
                         {isSandbox ? (
@@ -1593,6 +1698,8 @@ export default function RepoView({
                 embedded={true}
               />
             </div>
+          )}
+            </>
           )}
         </div>
       </div>
@@ -2092,3 +2199,132 @@ export default function RepoView({
     </div>
   );
 }
+
+const OverviewSkeleton = () => (
+  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '28px', width: '100%' }}>
+    {/* Left Column */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* Description Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '14px', width: '120px', marginBottom: '12px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '100%', marginBottom: '8px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '90%', marginBottom: '8px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '40%', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '12px', width: '80px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '50px', borderRadius: '4px' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '12px', width: '90px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '30px', borderRadius: '4px' }} />
+          </div>
+        </div>
+      </div>
+      {/* Team presence Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '14px', width: '150px', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+        </div>
+      </div>
+    </div>
+    {/* Right Column */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* Docs Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '16px', width: '140px', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const SessionsSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: '28px', width: '100%' }}>
+    {/* Active Rooms */}
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div className="skeleton" style={{ height: '22px', width: '220px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '32px', width: '150px', borderRadius: '6px' }} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '20px' }}>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div className="skeleton" style={{ height: '16px', width: '120px', borderRadius: '4px' }} />
+              <div className="skeleton" style={{ height: '16px', width: '80px', borderRadius: '4px' }} />
+            </div>
+            <div className="skeleton" style={{ height: '14px', width: '100%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '32px', width: '110px', borderRadius: '6px' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+    {/* Session History */}
+    <div>
+      <div className="skeleton" style={{ height: '22px', width: '150px', marginBottom: '16px', borderRadius: '4px' }} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px', minHeight: 'auto' }}>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexGrow: 1 }}>
+                <div className="skeleton" style={{ height: '14px', width: '120px', borderRadius: '4px' }} />
+                <div className="skeleton" style={{ height: '12px', width: '80px', borderRadius: '4px' }} />
+              </div>
+            </div>
+            <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '40%', borderRadius: '4px' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const TasksSkeleton = () => (
+  <div style={{ display: 'flex', gap: '20px', overflowX: 'auto', paddingBottom: '16px', width: '100%' }}>
+    {['To Do', 'In Progress', 'In Review', 'Done'].map(column => (
+      <div key={column} style={{ flex: '1 0 280px', background: 'var(--surface)', borderRadius: '12px', border: '1px solid var(--border)', padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="skeleton" style={{ height: '16px', width: '100px', borderRadius: '4px' }} />
+          <div className="skeleton" style={{ height: '16px', width: '24px', borderRadius: '50%' }} />
+        </div>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '16px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'auto' }}>
+            <div className="skeleton" style={{ height: '14px', width: '80%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div className="skeleton" style={{ height: '10px', width: '50px', borderRadius: '4px' }} />
+              <div className="skeleton" style={{ height: '20px', width: '20px', borderRadius: '50%' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    ))}
+  </div>
+);
+
+const DeploymentsSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', width: '100%' }}>
+    <div className="skeleton" style={{ height: '20px', width: '180px', borderRadius: '4px' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      {[1, 2].map(n => (
+        <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'auto' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '14px', width: '220px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '16px', width: '70px', borderRadius: '4px' }} />
+          </div>
+          <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+        </div>
+      ))}
+    </div>
+  </div>
+);

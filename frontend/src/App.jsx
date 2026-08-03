@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { projectCache } from './utils/projectCache';
 import Topbar from './components/Topbar';
 import Login from './pages/Login';
 import Home from './pages/Home';
@@ -129,6 +130,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setBranches(data);
+        projectCache.setTabData(repoName, 'branches', data);
       }
     } catch (err) {
       console.error(`Error fetching branches for ${repoName}:`, err);
@@ -257,20 +259,10 @@ export default function App() {
       fetchPresence();
       fetchTodayData();
       fetchRepos();
-      if (selectedRepo) {
-        fetchBranches(selectedRepo);
-      }
     }, 5000);
 
     return () => clearInterval(interval);
   }, [currentUser, selectedRepo]);
-
-  // Load branches when a repository is selected
-  useEffect(() => {
-    if (selectedRepo) {
-      fetchBranches(selectedRepo);
-    }
-  }, [selectedRepo]);
 
   // Handle username selection
   const handleLogin = (user) => {
@@ -292,6 +284,10 @@ export default function App() {
 
   // Handle repository selection
   const handleSelectRepo = (repoName) => {
+    const repoDetails = repos.find(r => r.name === repoName);
+    if (repoDetails) {
+      projectCache.setProjectMeta(repoName, repoDetails);
+    }
     setSelectedRepo(repoName);
     setActiveView('repo');
 
@@ -798,6 +794,7 @@ export default function App() {
             users={users}
             activePresence={activePresence}
             currentUser={currentUser}
+            fetchBranches={fetchBranches}
             onWorkOnBranch={handleWorkOnBranch}
             onAddTicket={handleAddTicket}
             onUpdateTicketStatus={handleUpdateTicketStatus}
