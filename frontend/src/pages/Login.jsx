@@ -19,7 +19,7 @@ export default function Login({ onLogin, users }) {
     window.location.href = `/api/auth/github?origin=${encodeURIComponent(origin)}`;
   };
 
-  const handleDevBypass = () => {
+  const handleDevBypass = async () => {
     const fallbackUser = users.find(u => u.username === 'you') || users[0] || {
       id: 1,
       username: 'you',
@@ -27,7 +27,22 @@ export default function Login({ onLogin, users }) {
       email: 'you@company.com',
       avatar_color: 'var(--violet)'
     };
-    onLogin(fallbackUser);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: fallbackUser.username })
+      });
+      if (res.ok) {
+        const authenticatedUser = await res.json();
+        onLogin(authenticatedUser);
+      } else {
+        onLogin(fallbackUser);
+      }
+    } catch (err) {
+      console.error('Dev bypass error:', err);
+      onLogin(fallbackUser);
+    }
   };
 
   return (

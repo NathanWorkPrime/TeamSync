@@ -87,8 +87,8 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         try { activeUser = JSON.parse(cached); } catch (e) {}
       }
       const headers = { 'Content-Type': 'application/json' };
-      if (activeUser && activeUser.username) {
-        headers['X-User-Username'] = activeUser.username;
+      if (activeUser && activeUser.session_token) {
+        headers['X-User-Session'] = activeUser.session_token;
       }
 
       const res = await fetch('/api/repos/join', {
