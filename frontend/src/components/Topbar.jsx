@@ -1,42 +1,58 @@
 import React from 'react';
+import { Sun, Moon, Settings } from 'lucide-react';
 
-export default function Topbar({ activeView, onViewChange, currentUser }) {
+export default function Topbar({ activeView, onViewChange, currentUser, theme, onThemeToggle }) {
   return (
     <div className="topbar">
-      <div className="brand" style={{ cursor: 'pointer' }} onClick={() => onViewChange('home')}>
+      <div className="brand" style={{ cursor: 'pointer' }} onClick={() => onViewChange('projects')}>
         <div className="brand-mark">&gt;_</div>
         <div className="brand-name">TeamSync</div>
       </div>
-      
-      <div className="tabs">
-        <div 
-          className={`tab ${activeView === 'home' ? 'active' : ''}`} 
-          onClick={() => onViewChange('home')}
-        >
-          Home
-        </div>
-        <div 
-          className={`tab ${activeView === 'projects' || activeView === 'repo' ? 'active' : ''}`} 
-          onClick={() => onViewChange('projects')}
-        >
-          Projects
-        </div>
-        <div 
-          className={`tab ${activeView === 'session' ? 'active' : ''}`} 
-          onClick={() => onViewChange('session')}
-        >
-          Session
-        </div>
-        <div 
-          className={`tab ${activeView === 'integrations' ? 'active' : ''}`} 
-          onClick={() => onViewChange('integrations')}
-        >
-          Integrations
-        </div>
-      </div>
 
       <div className="who" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <div className="avatar" style={{ backgroundColor: currentUser?.avatar_color || '#9D8CFF', color: '#0C1116' }}>
+        <button
+          onClick={() => onViewChange('global-settings')}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: activeView === 'global-settings' ? 'var(--teal)' : 'var(--text-dim)',
+            cursor: 'pointer',
+            padding: '6px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 0.15s ease',
+            marginRight: '4px'
+          }}
+          className="global-settings-btn"
+          title="Global Application Settings"
+        >
+          <Settings size={15} />
+        </button>
+
+        <button
+          onClick={onThemeToggle}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-dim)',
+            cursor: 'pointer',
+            padding: '6px',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 0.15s ease',
+            marginRight: '4px'
+          }}
+          className="theme-toggle-btn"
+          title={`Switch to ${theme === 'light' ? 'Dark' : 'Light'} Mode`}
+        >
+          {theme === 'light' ? <Moon size={15} /> : <Sun size={15} />}
+        </button>
+
+        <div className="avatar" style={{ backgroundColor: currentUser?.avatar_color || '#9D8CFF', color: 'rgba(15, 23, 42, 0.85)', position: 'relative' }}>
           {currentUser?.display_name ? currentUser.display_name.split(' ').map(n => n[0]).join('').toUpperCase() : 'JM'}
         </div>
         <span>{currentUser?.display_name || 'You'}</span>
