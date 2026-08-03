@@ -4,6 +4,25 @@ import { Plus, AlertTriangle, RefreshCw, FolderPlus } from 'lucide-react';
 export default function Projects({ repos, reposError, onSelectRepo, onRegisterSuccess, onRetry }) {
   const [activeTab, setActiveTab] = useState('register');
   const [shareCode, setShareCode] = useState('');
+  
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    if (!token) {
+      token = localStorage.getItem('session_token') || '';
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
 
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState('');
@@ -26,7 +45,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
     try {
       const res = await fetch('/api/repos', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim(),
@@ -81,19 +100,9 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
     setError(null);
 
     try {
-      const cached = localStorage.getItem('teamsync_current_user');
-      let activeUser = null;
-      if (cached) {
-        try { activeUser = JSON.parse(cached); } catch (e) {}
-      }
-      const headers = { 'Content-Type': 'application/json' };
-      if (activeUser && activeUser.session_token) {
-        headers['X-User-Session'] = activeUser.session_token;
-      }
-
       const res = await fetch('/api/repos/join', {
         method: 'POST',
-        headers,
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ share_code: shareCode.trim() })
       });
 

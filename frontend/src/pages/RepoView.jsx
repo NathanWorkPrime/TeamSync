@@ -49,6 +49,25 @@ export default function RepoView({
   onAddUser,
   onRemoveUser
 }) {
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    if (!token) {
+      token = localStorage.getItem('session_token') || '';
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
+
   const [localSubTab, setLocalSubTab] = useState('sessions');
   const subTab = propsSubTab !== undefined ? propsSubTab : localSubTab;
   const setSubTab = onTabChange !== undefined ? onTabChange : setLocalSubTab;
@@ -119,7 +138,9 @@ export default function RepoView({
   // Fetch overview data
   const fetchOverviewData = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/overview`);
+      const res = await fetch(`/api/repos/${repoName}/overview`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setOverview(data);
@@ -138,7 +159,9 @@ export default function RepoView({
       if (docSearch) url += `&search=${encodeURIComponent(docSearch)}`;
       if (docTypeFilter) url += `&doc_type=${docTypeFilter}`;
       
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDocs(data);
@@ -162,7 +185,9 @@ export default function RepoView({
   // Fetch tasks
   const fetchTasks = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/tasks`);
+      const res = await fetch(`/api/repos/${repoName}/tasks`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
@@ -182,7 +207,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/tasks`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           title: newTaskTitle,
           description: newTaskDescription,
@@ -212,7 +237,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload)
       });
       if (res.ok) {
@@ -226,7 +251,9 @@ export default function RepoView({
   // Fetch deployments
   const fetchDeployments = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/deployments`);
+      const res = await fetch(`/api/repos/${repoName}/deployments`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDeployments(data);
@@ -241,7 +268,9 @@ export default function RepoView({
   // Fetch deployment status
   const fetchDeployStatus = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/deploy/status`);
+      const res = await fetch(`/api/repos/${repoName}/deploy/status`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDeployStatus(data.status);
@@ -257,7 +286,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/deploy`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: 'main',
           user_id: currentUser?.id || 1,
@@ -279,7 +308,9 @@ export default function RepoView({
   // Fetch session rooms history
   const fetchSessionHistory = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/sessions`);
+      const res = await fetch(`/api/repos/${repoName}/sessions`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setSessionHistory(data);
@@ -372,7 +403,7 @@ export default function RepoView({
 
       const res = await fetch('/api/docs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload)
       });
 
@@ -400,7 +431,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/docs/${selectedDoc.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           title: editDocTitle,
           content: editDocContent,
@@ -425,7 +456,8 @@ export default function RepoView({
     if (!confirm('Are you sure you want to delete this document?')) return;
     try {
       const res = await fetch(`/api/docs/${id}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: getHeaders()
       });
       if (res.ok) {
         setSelectedDoc(null);
@@ -540,7 +572,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/deploy`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: rollbackTarget.branch_name,
           commit_hash: rollbackTarget.commit_hash,

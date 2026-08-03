@@ -27,6 +27,25 @@ export default function BranchMap({
   repoName, 
   githubRepo 
 }) {
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    if (!token) {
+      token = localStorage.getItem('session_token') || '';
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
+
   const [selectedBranch, setSelectedBranch] = useState(branches[0]?.name || null);
   const [isMergeSidebarOpen, setIsMergeSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('history'); // 'history', 'changelog'
@@ -72,7 +91,9 @@ export default function BranchMap({
     setProtectionLoading(true);
     setProtectionError(null);
     try {
-      const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(branchName)}/protection`);
+      const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(branchName)}/protection`, {
+        headers: getHeaders()
+      });
       if (!res.ok) {
         throw new Error('Failed to fetch branch protection settings');
       }
@@ -88,13 +109,13 @@ export default function BranchMap({
 
   const handleSaveProtection = async (e) => {
     e.preventDefault();
-    if (!selectedBranch || !repoName || !protectionSettings) return;
+    if (!selectedBranch || !repoName) return;
     setProtectionSaving(true);
     setProtectionError(null);
     try {
       const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(selectedBranch)}/protection`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(protectionSettings)
       });
       if (!res.ok) {
@@ -137,7 +158,9 @@ export default function BranchMap({
     if (!branchName) return;
     setHistoryLoading(true);
     try {
-      const res = await fetch(`/api/repos/${repoName}/branches/${branchName}/history`);
+      const res = await fetch(`/api/repos/${repoName}/branches/${branchName}/history`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setHistoryEvents(data);
@@ -154,7 +177,9 @@ export default function BranchMap({
     if (!branchName) return;
     setChangelogLoading(true);
     try {
-      const res = await fetch(`/api/rooms/${repoName}/${branchName}/deployments`);
+      const res = await fetch(`/api/rooms/${repoName}/${branchName}/deployments`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         const deploymentsWithChangelog = (data || []).filter(d => d.status === 'success' && d.changelog);
@@ -192,7 +217,9 @@ export default function BranchMap({
       setCompareLoading(true);
       setCompareError(null);
       try {
-        const res = await fetch(`/api/repos/${repoName}/compare?base=${mergeTarget}&head=${sourceBranch}`);
+        const res = await fetch(`/api/repos/${repoName}/compare?base=${mergeTarget}&head=${sourceBranch}`, {
+          headers: getHeaders()
+        });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || `Comparison failed with status ${res.status}`);
@@ -323,7 +350,7 @@ export default function BranchMap({
       try {
         await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             event_type: 'repo:synced',
             event_category: 'project',
@@ -386,7 +413,7 @@ export default function BranchMap({
       try {
         await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             event_type: 'repo:pulled',
             event_category: 'project',
@@ -446,7 +473,7 @@ export default function BranchMap({
       try {
         await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             event_type: 'repo:pushed',
             event_category: 'project',
@@ -480,7 +507,9 @@ export default function BranchMap({
     if (!selectedBranchData?.pr?.number) return;
     setPrLoading(true);
     try {
-      const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}`);
+      const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setPrDetails(data);
@@ -507,7 +536,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           sourceBranch,
           targetBranch: mergeTarget,
@@ -535,7 +564,8 @@ export default function BranchMap({
     setPrApproving(true);
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}/approve`, {
-        method: 'POST'
+        method: 'POST',
+        headers: getHeaders()
       });
       const data = await res.json();
       if (!res.ok) {
@@ -559,7 +589,8 @@ export default function BranchMap({
     }));
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}/merge`, {
-        method: 'POST'
+        method: 'POST',
+        headers: getHeaders()
       });
       const data = await res.json();
       if (!res.ok) {
@@ -588,7 +619,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/branches/${selectedBranch}/changelog`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           content: newChangelogContent,
           author_user_id: currentUser?.id || 1
@@ -613,7 +644,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/branches`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: newBranchName.trim(),
           base_branch: baseBranchName
