@@ -682,15 +682,21 @@ app.post('/api/repos', (req, res) => {
       res.status(201).json({ id: dbId, name, description, github_repo, created_at: now, share_code: shareCode, local_path: resolvedPath });
     } catch (gitErr) {
       console.error(`[Server] Git/GitHub initialization failed for repository ${name}:`, gitErr.message);
-      res.status(201).json({ 
-        id: dbId, 
-        name, 
-        description, 
-        github_repo, 
-        created_at: now,
-        share_code: shareCode,
-        local_path: resolvedPath,
-        warning: `Project registered in DB, but Git/GitHub setup failed: ${gitErr.message}`
+      
+      // Roll back database insert on Git/GitHub initialization failure
+      db.run("DELETE FROM repositories WHERE id = ?", [dbId], (deleteErr) => {
+        if (deleteErr) {
+          console.error(`[Server] Failed to roll back database row for repository ID ${dbId}:`, deleteErr.message);
+        } else {
+          console.log(`[Server] Successfully rolled back database row for repository ID ${dbId}`);
+        }
+      });
+
+      // Remove from paths cache
+      githubService.repoPathsCache.delete(name.trim());
+
+      res.status(500).json({ 
+        error: `Git/GitHub initialization failed for repository "${name}": ${gitErr.message}`
       });
     }
   });
