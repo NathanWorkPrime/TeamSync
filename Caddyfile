@@ -1,0 +1,8 @@
+# TeamSync Caddy Server Configuration
+# Serving over HTTPS with internal self-signed TLS certificates on port 8080
+102.130.122.57:8080 {
+    root * C:\var\www\teamsync\frontend\dist
+    file_server
+    reverse_proxy /api/* localhost:5000
+    tls internal
+}

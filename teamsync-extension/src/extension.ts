@@ -250,7 +250,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   app.use(cors({
     origin: (origin, callback) => {
-      if (!origin || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === 'http://102.130.122.57:8080') {
+      if (!origin || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === 'https://102.130.122.57:8080') {
         callback(null, true);
       } else {
         callback(new Error('Blocked by CORS policy'));

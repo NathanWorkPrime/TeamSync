@@ -263,7 +263,7 @@ function activate(context) {
     const PORT = 37845;
     app.use((0, cors_1.default)({
         origin: (origin, callback) => {
-            if (!origin || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === 'http://102.130.122.57:8080') {
+            if (!origin || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === 'https://102.130.122.57:8080') {
                 callback(null, true);
             }
             else {
