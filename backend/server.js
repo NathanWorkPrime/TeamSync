@@ -23,27 +23,8 @@ eventBus.setSocketIO(io);
 app.use(cors());
 app.use(express.json());
 
-// Multi-Tenancy Tenant Scoping & Authentication Middleware (Phase 1)
+// Multi-Tenancy Tenant Scoping Middleware (Phase 1)
 app.use((req, res, next) => {
-  const sessionToken = req.headers['x-user-session'];
-  if (sessionToken) {
-    const encryption = require('./services/encryption');
-    const decryptedUsername = encryption.decrypt(sessionToken);
-    if (decryptedUsername) {
-      db.get('SELECT * FROM users WHERE LOWER(username) = LOWER(?)', [decryptedUsername.trim()], (err, user) => {
-        if (!err && user) {
-          req.user = user;
-          req.orgId = user.organization_id;
-        } else {
-          console.warn(`[AuthMiddleware] Session token decrypted to '${decryptedUsername}' but user was not found in DB.`);
-        }
-        next();
-      });
-      return;
-    }
-  }
-
-  // Fallback for requests without sessions (e.g. public endpoints, webhooks)
   let orgId = 1; // Default to Tech-Finity (ID: 1)
   
   const tenantHeader = req.headers['x-tenant-id'];
@@ -121,7 +102,7 @@ app.get('/api/config/status', (req, res) => {
 
 // GET /api/users - List users
 app.get('/api/users', (req, res) => {
-  db.all('SELECT id, username, display_name, email, avatar_color, github_id, organization_id FROM users', [], (err, rows) => {
+  db.all('SELECT * FROM users', [], (err, rows) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -289,7 +270,7 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
   }
   
   try {
-    const token = process.env.GITHUB_PAT || userToken;
+    const token = userToken || process.env.GITHUB_PAT;
     if (!token) {
       return false;
     }
@@ -329,35 +310,6 @@ app.get('/api/auth/config', (req, res) => {
   res.json({
     githubOAuthEnabled: isGitHubOAuthConfigured().configured,
     allowDevMockLogin: process.env.ALLOW_DEV_MOCK_LOGIN === 'true'
-  });
-});
-
-// POST /api/auth/login - Developer Bypass session generator
-app.post('/api/auth/login', (req, res) => {
-  const { username } = req.body;
-  if (!username) {
-    return res.status(400).json({ error: 'Username is required.' });
-  }
-
-  if (process.env.ALLOW_DEV_MOCK_LOGIN !== 'true' && username === 'you') {
-    return res.status(403).json({ error: 'Developer bypass is disabled.' });
-  }
-
-  const normalized = username.toLowerCase().trim();
-  db.get('SELECT id, username, display_name, email, avatar_color, organization_id, github_id FROM users WHERE LOWER(username) = LOWER(?)', [normalized], (err, user) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    const encryption = require('./services/encryption');
-    const sessionToken = encryption.encrypt(user.username);
-    res.json({
-      ...user,
-      session_token: sessionToken
-    });
   });
 });
 
@@ -442,14 +394,13 @@ app.get('/api/auth/github/callback', async (req, res) => {
     const avatarColor = 'var(--teal)'; // Unique color for GitHub OAuth accounts
     
     db.get('SELECT * FROM users WHERE github_id = ? OR username = ?', [githubId, username], (err, existingUser) => {
-      const sessionToken = encryption.encrypt(username);
       if (existingUser) {
         db.run(
           'UPDATE users SET github_id = ?, github_token = ?, email = ? WHERE id = ?',
           [githubId, encryptedToken, email || existingUser.email, existingUser.id],
           (updateErr) => {
             if (updateErr) console.error('[OAuth] Database update error:', updateErr.message);
-            res.redirect(`${redirectOrigin}/?username=${username}&session_token=${encodeURIComponent(sessionToken)}`);
+            res.redirect(`${redirectOrigin}/?username=${username}`);
           }
         );
       } else {
@@ -468,7 +419,7 @@ app.get('/api/auth/github/callback', async (req, res) => {
               user_id: this.lastID,
               metadata: { username, display_name: displayName, email, source: 'github_oauth' }
             });
-            res.redirect(`${redirectOrigin}/?username=${username}&session_token=${encodeURIComponent(sessionToken)}`);
+            res.redirect(`${redirectOrigin}/?username=${username}`);
           }
         );
       }
@@ -482,56 +433,62 @@ app.get('/api/auth/github/callback', async (req, res) => {
 // GET /api/repos - List company repos, filtered by collaborator status
 app.get('/api/repos', async (req, res) => {
   try {
+    const username = req.headers['x-user-username'] || req.query.username;
     const repos = await githubService.getRepos();
-    const user = req.user;
     
-    if (!user) {
+    if (!username) {
       return res.json(repos);
     }
     
-    // Local fallback users see everything
-    if (!user.github_token) {
-      return res.json(repos);
-    }
-    
-    const encryption = require('./services/encryption');
-    const decryptedToken = encryption.decrypt(user.github_token);
-    
-    if (!decryptedToken) {
-      return res.json(repos);
-    }
-    
-    // Filter repos by collaborator access on GitHub
-    const filteredRepos = [];
-    let checkFailed = false;
-    let failureReason = '';
-    
-    for (const repo of repos) {
-      if (!repo.github_repo) {
-        filteredRepos.push(repo); // Local-only repos visible to everyone
-        continue;
+    db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
+      if (err || !user) {
+        return res.json(repos); // Fallback to all if user not found in DB
       }
       
-      try {
-        const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
-        if (hasAccess) {
-          filteredRepos.push(repo);
-        }
-      } catch (err) {
-        checkFailed = true;
-        failureReason = err.message;
-        break;
+      // Local fallback users see everything
+      if (!user.github_token) {
+        return res.json(repos);
       }
-    }
-    
-    if (checkFailed) {
-      return res.status(503).json({
-        error: 'GitHub Access Verification Error',
-        message: `Could not verify collaborator access on GitHub: ${failureReason}. Please check your connection or reload the page.`
-      });
-    }
-    
-    res.json(filteredRepos);
+      
+      const encryption = require('./services/encryption');
+      const decryptedToken = encryption.decrypt(user.github_token);
+      
+      if (!decryptedToken) {
+        return res.json(repos);
+      }
+      
+      // Filter repos by collaborator access on GitHub
+      const filteredRepos = [];
+      let checkFailed = false;
+      let failureReason = '';
+      
+      for (const repo of repos) {
+        if (!repo.github_repo) {
+          filteredRepos.push(repo); // Local-only repos visible to everyone
+          continue;
+        }
+        
+        try {
+          const hasAccess = await checkUserCollaboratorAccess(user.username, repo.github_repo, decryptedToken);
+          if (hasAccess) {
+            filteredRepos.push(repo);
+          }
+        } catch (err) {
+          checkFailed = true;
+          failureReason = err.message;
+          break;
+        }
+      }
+      
+      if (checkFailed) {
+        return res.status(503).json({
+          error: 'GitHub Access Verification Error',
+          message: `Could not verify collaborator access on GitHub: ${failureReason}. Please check your connection or reload the page.`
+        });
+      }
+      
+      res.json(filteredRepos);
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -607,12 +564,12 @@ app.post('/api/repos', (req, res) => {
 // POST /api/repos/join - Join an existing project using share code
 app.post('/api/repos/join', (req, res) => {
   const { share_code } = req.body;
-  const user = req.user;
+  const username = req.headers['x-user-username'] || req.query.username;
 
   if (!share_code) {
     return res.status(400).json({ error: 'Share code is required.' });
   }
-  if (!user) {
+  if (!username) {
     return res.status(401).json({ error: 'User context is required.' });
   }
 
@@ -627,23 +584,33 @@ app.post('/api/repos/join', (req, res) => {
       return res.status(404).json({ error: 'Invalid share code. Repository not found.' });
     }
 
-    // 2. Organization isolation checks
-    if (user.organization_id && user.organization_id !== repo.organization_id) {
-      return res.status(403).json({ error: 'Cannot join a project belonging to a different organization.' });
-    }
+    // 2. Look up the requesting user
+    db.get("SELECT * FROM users WHERE username = ?", [username], (userErr, user) => {
+      if (userErr) {
+        return res.status(500).json({ error: userErr.message });
+      }
+      if (!user) {
+        return res.status(404).json({ error: 'User profile not found.' });
+      }
 
-    // 3. Link the user to the organization if they are not yet associated
-    if (!user.organization_id) {
-      db.run("UPDATE users SET organization_id = ? WHERE id = ?", [repo.organization_id, user.id], (updateErr) => {
-        if (updateErr) {
-          return res.status(500).json({ error: updateErr.message });
-        }
-        return res.json({ success: true, repository: repo, message: 'Successfully joined project and organization.' });
-      });
-    } else {
-      // User already in the same organization
-      return res.json({ success: true, repository: repo, message: 'Successfully verified repository access.' });
-    }
+      // 3. Organization isolation checks
+      if (user.organization_id && user.organization_id !== repo.organization_id) {
+        return res.status(403).json({ error: 'Cannot join a project belonging to a different organization.' });
+      }
+
+      // 4. Link the user to the organization if they are not yet associated
+      if (!user.organization_id) {
+        db.run("UPDATE users SET organization_id = ? WHERE id = ?", [repo.organization_id, user.id], (updateErr) => {
+          if (updateErr) {
+            return res.status(500).json({ error: updateErr.message });
+          }
+          return res.json({ success: true, repository: repo, message: 'Successfully joined project and organization.' });
+        });
+      } else {
+        // User already in the same organization
+        return res.json({ success: true, repository: repo, message: 'Successfully verified repository access.' });
+      }
+    });
   });
 });
 
@@ -1248,7 +1215,7 @@ app.post('/api/integrations/:source_key/tickets', (req, res) => {
     }
 
     // 2. Find assignee user by email or username if possible
-    db.get('SELECT id FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(display_name) = LOWER(?)', [assignee_email, assignee_email], (err, user) => {
+    db.get('SELECT id FROM users WHERE username = ? OR display_name = ?', [assignee_email, assignee_email], (err, user) => {
       const assigneeUserId = user ? user.id : null;
 
       // 3. Check loop prevention / existing ticket

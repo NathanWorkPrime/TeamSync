@@ -66,8 +66,8 @@ export default function App() {
       if (!activeUser && cached) {
         try { activeUser = JSON.parse(cached); } catch (e) {}
       }
-      if (activeUser && activeUser.session_token) {
-        headers['X-User-Session'] = activeUser.session_token;
+      if (activeUser) {
+        headers['X-User-Username'] = activeUser.username;
       }
       const res = await fetch('/api/repos', { headers });
       if (res.ok) {
@@ -156,8 +156,7 @@ export default function App() {
     // Handle GitHub OAuth callback redirect
     const urlParams = new URLSearchParams(window.location.search);
     const oauthUsername = urlParams.get('username');
-    const sessionToken = urlParams.get('session_token');
-    if (oauthUsername && sessionToken) {
+    if (oauthUsername) {
       // Clear URL parameters
       window.history.replaceState({}, document.title, window.location.pathname);
       
@@ -167,7 +166,6 @@ export default function App() {
         .then(usersList => {
           const matchedUser = usersList.find(u => u.username === oauthUsername.toLowerCase().trim());
           if (matchedUser) {
-            matchedUser.session_token = sessionToken;
             handleLogin(matchedUser);
           }
         })

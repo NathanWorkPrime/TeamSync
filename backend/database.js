@@ -526,45 +526,17 @@ function initializeSchema() {
     // Replace with real project creation flow once registration UI access is defined for teams.
     // Always seed core repositories on startup if they don't exist
     db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
-      const finishSetup = () => {
-        // Resolve TempRepo749 / teamsync-validation-test mismatch:
-        // 1. Rename TempRepo749 to teamsync-validation-test, set github_repo, set allow_sandbox_deploy = 1
-        db.run("UPDATE repositories SET name = 'teamsync-validation-test', github_repo = 'NathanWorkPrime/teamsync-validation-test', allow_sandbox_deploy = 1 WHERE name = 'TempRepo749'", (migrationErr) => {
-          if (!migrationErr) {
-            // 2. Rename in events history
-            db.run("UPDATE events SET repo_name = 'teamsync-validation-test' WHERE repo_name = 'TempRepo749'");
-          }
-          
-          // 3. Insert teamsync-validation-test if not present (e.g. in VM where TempRepo749 was not present)
-          db.get("SELECT * FROM repositories WHERE name = 'teamsync-validation-test'", [], (selectErr, repoRow) => {
-            if (!selectErr && !repoRow) {
-              console.log("[Database] Inserting missing teamsync-validation-test repository...");
-              const now = new Date().toISOString();
-              db.run(
-                "INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at, organization_id) VALUES (?, ?, ?, ?, ?, 1)",
-                ["teamsync-validation-test", "E2E Validation Test Repository", "NathanWorkPrime/teamsync-validation-test", 1, now],
-                (insertErr) => {
-                  if (resolveDbReady) resolveDbReady();
-                }
-              );
-            } else {
-              if (resolveDbReady) resolveDbReady();
-            }
-          });
-        });
-      };
-
       if (row && row.count === 0) {
         console.log("Seeding core repositories...");
         const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
         const now = new Date().toISOString();
         stmt.run("TeamSync", "Operational control centre for software development.", "NathanWorkPrime/TeamSync", 1, now);
         stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
-        stmt.finalize(() => {
-          finishSetup();
-        });
-      } else {
-        finishSetup();
+        stmt.finalize();
+      }
+      // Resolve schema initialization promise
+      if (resolveDbReady) {
+        resolveDbReady();
       }
     });
   });
