@@ -57,6 +57,18 @@ let currentBranch = '';
 let currentSessionLink = '';
 let activeStatusBarItem = null;
 const pendingNotifications = [];
+function showInfo(message, ...items) {
+    queueNotification('info', message);
+    return vscode.window.showInformationMessage(message, ...items);
+}
+function showWarning(message, ...items) {
+    queueNotification('warning', message);
+    return vscode.window.showWarningMessage(message, ...items);
+}
+function showError(message, ...items) {
+    queueNotification('error', message);
+    return vscode.window.showErrorMessage(message, ...items);
+}
 function queueNotification(type, message) {
     const cleanMessage = message.replace(/^TeamSync( Alert)?: /, '');
     const notification = {
@@ -109,28 +121,6 @@ function queryGit(cmd, cwd) {
 }
 function activate(context) {
     console.log('TeamSync Companion Extension is now active!');
-    // Wrap VS Code notification APIs to automatically queue notifications for the web app
-    const originalShowInfo = vscode.window.showInformationMessage;
-    vscode.window.showInformationMessage = function (message, ...items) {
-        if (typeof message === 'string') {
-            queueNotification('info', message);
-        }
-        return originalShowInfo.call(vscode.window, message, ...items);
-    };
-    const originalShowWarning = vscode.window.showWarningMessage;
-    vscode.window.showWarningMessage = function (message, ...items) {
-        if (typeof message === 'string') {
-            queueNotification('warning', message);
-        }
-        return originalShowWarning.call(vscode.window, message, ...items);
-    };
-    const originalShowError = vscode.window.showErrorMessage;
-    vscode.window.showErrorMessage = function (message, ...items) {
-        if (typeof message === 'string') {
-            queueNotification('error', message);
-        }
-        return originalShowError.call(vscode.window, message, ...items);
-    };
     const updateServerUrl = () => {
         const configUrl = vscode.workspace.getConfiguration('teamsync').get('serverUrl');
         if (configUrl) {
@@ -264,7 +254,7 @@ function activate(context) {
                 sendHeartbeat();
                 if (currentConflictsCount > 0) {
                     const filesList = currentConflicts.map((c) => path.basename(c.uri.fsPath)).join(', ');
-                    vscode.window.showWarningMessage(`TeamSync Alert: Merge conflicts detected in: ${filesList}. Please resolve before merging.`);
+                    showWarning(`TeamSync Alert: Merge conflicts detected in: ${filesList}. Please resolve before merging.`);
                     try {
                         const repoName = path.basename(rootPath);
                         await sendPostRequest(`${teamSyncServerUrl}/api/events`, {
@@ -317,14 +307,21 @@ function activate(context) {
         const { type, message } = req.body;
         const msg = message || 'Test companion notification';
         if (type === 'error') {
-            vscode.window.showErrorMessage(msg);
+            showError(msg);
         }
         else if (type === 'warning') {
-            vscode.window.showWarningMessage(msg);
+            showWarning(msg);
         }
         else {
-            vscode.window.showInformationMessage(msg);
+            showInfo(msg);
         }
+        res.json({ success: true });
+    });
+    // POST /test-unrelated-notification - Trigger an unpatched VS Code notification to prove isolation
+    app.post('/test-unrelated-notification', (req, res) => {
+        const { message } = req.body;
+        const msg = message || 'Unrelated VS Code system notification';
+        vscode.window.showInformationMessage(msg);
         res.json({ success: true });
     });
     // GET /detect-repo-status - Check local repository status
@@ -905,7 +902,7 @@ function activate(context) {
             return;
         }
         try {
-            vscode.window.showInformationMessage(`TeamSync: Starting collaboration session for ${repo} / ${branch}...`);
+            showInfo(`TeamSync: Starting collaboration session for ${repo} / ${branch}...`);
             let sessionLink = '';
             const octActive = await isRealOCTActive();
             try {
@@ -936,7 +933,7 @@ function activate(context) {
                             '-' +
                             Math.random().toString(36).substring(2, 6).toUpperCase();
                         sessionLink = `oct://join/TS-${randomCode}`;
-                        vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): No session link captured. Using mock: ${sessionLink}`);
+                        showWarning(`TeamSync (Dev Mode Fallback): No session link captured. Using mock: ${sessionLink}`);
                     }
                     else {
                         throw new Error('Failed to capture Eclipse OCT session link from clipboard.');
@@ -953,7 +950,7 @@ function activate(context) {
                         '-' +
                         Math.random().toString(36).substring(2, 6).toUpperCase();
                     sessionLink = `oct://join/TS-${randomCode}`;
-                    vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT command failed. Using mock: ${sessionLink}`);
+                    showWarning(`TeamSync (Dev Mode Fallback): Real OCT command failed. Using mock: ${sessionLink}`);
                 }
                 else {
                     throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to host sessions.');
@@ -972,7 +969,7 @@ function activate(context) {
             activeStatusBarItem.tooltip = `In TeamSync Session at ${sessionLink}`;
             activeStatusBarItem.show();
             context.subscriptions.push(activeStatusBarItem);
-            vscode.window.showInformationMessage(`TeamSync: Session created! Join code: ${sessionLink}`);
+            showInfo(`TeamSync: Session created! Join code: ${sessionLink}`);
             res.json({
                 success: true,
                 link: sessionLink,
@@ -980,7 +977,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Failed to start session: ${err.message}`);
+            showError(`TeamSync: Failed to start session: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -992,7 +989,7 @@ function activate(context) {
             return;
         }
         try {
-            vscode.window.showInformationMessage(`TeamSync: Joining existing session for ${repo} / ${branch}...`);
+            showInfo(`TeamSync: Joining existing session for ${repo} / ${branch}...`);
             const octActive = await isRealOCTActive();
             try {
                 await executeOCTCommand('join', session_link);
@@ -1009,7 +1006,7 @@ function activate(context) {
                         throw new Error(`Real Eclipse OCT session join failed: ${innerErr.message}`);
                     }
                     if (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test) {
-                        vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
+                        showWarning(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
                     }
                     else {
                         throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to join sessions.');
@@ -1029,7 +1026,7 @@ function activate(context) {
             activeStatusBarItem.tooltip = `Joined TeamSync Session at ${session_link}`;
             activeStatusBarItem.show();
             context.subscriptions.push(activeStatusBarItem);
-            vscode.window.showInformationMessage(`TeamSync: Successfully joined session: ${session_link}`);
+            showInfo(`TeamSync: Successfully joined session: ${session_link}`);
             res.json({
                 success: true,
                 link: session_link,
@@ -1037,14 +1034,14 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Failed to join session: ${err.message}`);
+            showError(`TeamSync: Failed to join session: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
     // POST /leave-session
     app.post('/leave-session', async (req, res) => {
         try {
-            vscode.window.showInformationMessage(`TeamSync: Leaving collaboration session...`);
+            showInfo(`TeamSync: Leaving collaboration session...`);
             try {
                 await executeOCTCommand('leave');
             }
@@ -1065,7 +1062,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Failed to leave session: ${err.message}`);
+            showError(`TeamSync: Failed to leave session: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -1142,7 +1139,7 @@ function activate(context) {
             }
             let actionTaken = '';
             if (!fs.existsSync(targetDir)) {
-                vscode.window.showInformationMessage(`TeamSync: Cloning ${repo} into ${baseDir}...`);
+                showInfo(`TeamSync: Cloning ${repo} into ${baseDir}...`);
                 actionTaken = 'cloned';
                 const cloneUrl = `https://github.com/${repo}.git`;
                 await runCmd(`git clone ${cloneUrl}`, baseDir);
@@ -1169,15 +1166,15 @@ function activate(context) {
                 if (currentBranchName === branch && isClean) {
                     // Already on correct branch and clean, just open it!
                     actionTaken = 'opened';
-                    vscode.window.showInformationMessage(`TeamSync: Opening existing workspace at ${targetDir}...`);
+                    showInfo(`TeamSync: Opening existing workspace at ${targetDir}...`);
                 }
                 else {
-                    vscode.window.showInformationMessage(`TeamSync: Updating local repository at ${targetDir}...`);
+                    showInfo(`TeamSync: Updating local repository at ${targetDir}...`);
                     actionTaken = 'updated';
                     await runCmd(`git fetch origin`, targetDir);
                     // Handle stashing if requested and dirty
                     if (!isClean && stash === true) {
-                        vscode.window.showInformationMessage(`TeamSync: Stashing uncommitted changes in ${repoBasename}...`);
+                        showInfo(`TeamSync: Stashing uncommitted changes in ${repoBasename}...`);
                         await runCmd('git stash', targetDir);
                     }
                     await gitCheckoutAndSync(targetDir, branch);
@@ -1204,7 +1201,7 @@ function activate(context) {
             await vscode.commands.executeCommand('vscode.openFolder', uri, {
                 forceNewWindow: true
             });
-            vscode.window.showInformationMessage(`TeamSync: Successfully opened ${repoBasename} (${branch}) locally!`);
+            showInfo(`TeamSync: Successfully opened ${repoBasename} (${branch}) locally!`);
             // Automatically launch TeamSync browser application
             vscode.env.openExternal(vscode.Uri.parse('http://localhost:5173/'));
             res.json({
@@ -1214,7 +1211,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Failed to clone/update repository: ${err.message}`);
+            showError(`TeamSync: Failed to clone/update repository: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -1247,7 +1244,7 @@ function activate(context) {
                 res.status(404).json({ error: `Repository directory not found at ${targetDir}.` });
                 return;
             }
-            vscode.window.showInformationMessage(`TeamSync: Pulling changes for origin/${branch}...`);
+            showInfo(`TeamSync: Pulling changes for origin/${branch}...`);
             await runCmd(`git fetch origin`, targetDir);
             await gitCheckoutAndSync(targetDir, branch);
             await runCmd(`git pull origin ${branch}`, targetDir);
@@ -1257,7 +1254,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Pull failed: ${err.message}`);
+            showError(`TeamSync: Pull failed: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -1290,7 +1287,7 @@ function activate(context) {
                 res.status(404).json({ error: `Repository directory not found at ${targetDir}.` });
                 return;
             }
-            vscode.window.showInformationMessage(`TeamSync: Pushing local commits to origin/${branch}...`);
+            showInfo(`TeamSync: Pushing local commits to origin/${branch}...`);
             await gitCheckoutAndSync(targetDir, branch);
             await runCmd(`git push origin ${branch}`, targetDir);
             res.json({
@@ -1299,7 +1296,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Push failed: ${err.message}`);
+            showError(`TeamSync: Push failed: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -1364,7 +1361,7 @@ function activate(context) {
             try {
                 await runCmd(`git merge ${sourceBranch}`, targetDir);
                 // 4.5. Push the merge commit to remote and verify success
-                vscode.window.showInformationMessage(`TeamSync: Pushing merge commit to origin/${targetBranch}...`);
+                showInfo(`TeamSync: Pushing merge commit to origin/${targetBranch}...`);
                 await runCmd(`git push origin ${targetBranch}`, targetDir);
                 // Post event to backend
                 try {
@@ -1422,7 +1419,7 @@ function activate(context) {
             }
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Merge failed: ${err.message}`);
+            showError(`TeamSync: Merge failed: ${err.message}`);
             res.status(500).json({ error: err.message });
         }
     });
@@ -1481,7 +1478,7 @@ function activate(context) {
             });
         }
         catch (err) {
-            vscode.window.showErrorMessage(`TeamSync: Commit failed: ${err.message}`);
+            showError(`TeamSync: Commit failed: ${err.message}`);
             res.status(500).json({ error: err.message, log });
         }
     });
@@ -1688,7 +1685,7 @@ function activate(context) {
     telemetryTimer = setInterval(sendHeartbeat, 5000);
     // Register manual status check command
     const disposable = vscode.commands.registerCommand('teamsync.checkStatus', () => {
-        vscode.window.showInformationMessage('TeamSync Companion Server is active on port 37845.');
+        showInfo('TeamSync Companion Server is active on port 37845.');
         sendHeartbeat();
     });
     context.subscriptions.push(disposable);
