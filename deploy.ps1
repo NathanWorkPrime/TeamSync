@@ -16,10 +16,10 @@ try {
     Write-Host "[Deploy] Navigating to repository root..." -ForegroundColor Cyan
     Set-Location -Path "C:\var\www\teamsync"
 
-    Write-Host "[Deploy] 1. Pulling latest master branch..." -ForegroundColor Cyan
+    Write-Host "[Deploy] 1. Pulling latest agent-dev branch..." -ForegroundColor Cyan
     git fetch origin
-    git checkout master
-    git pull origin master
+    git checkout agent-dev
+    git pull origin agent-dev
 
     Write-Host "[Deploy] 2. Building frontend assets..." -ForegroundColor Cyan
     Set-Location -Path "C:\var\www\teamsync\frontend"

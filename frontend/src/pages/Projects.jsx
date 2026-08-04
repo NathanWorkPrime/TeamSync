@@ -1,9 +1,53 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Plus, AlertTriangle, RefreshCw, FolderPlus } from 'lucide-react';
 
-export default function Projects({ repos, reposError, onSelectRepo, onRegisterSuccess, onRetry }) {
+export default function Projects({ repos, reposError, reposErrorResetAt, onSelectRepo, onRegisterSuccess, onRetry }) {
   const [activeTab, setActiveTab] = useState('register');
   const [shareCode, setShareCode] = useState('');
+  const [timeLeft, setTimeLeft] = useState(null);
+
+  useEffect(() => {
+    if (!reposErrorResetAt) {
+      setTimeLeft(null);
+      return;
+    }
+
+    const calculateTimeLeft = () => {
+      const remaining = Math.max(0, Math.ceil(reposErrorResetAt - Date.now() / 1000));
+      setTimeLeft(remaining);
+    };
+
+    calculateTimeLeft();
+    const interval = setInterval(calculateTimeLeft, 1000);
+
+    return () => clearInterval(interval);
+  }, [reposErrorResetAt]);
+
+  const formatTimeLeft = (seconds) => {
+    if (seconds <= 0) return '0s';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m > 0) {
+      return `${m}m ${s}s`;
+    }
+    return `${s}s`;
+  };
+  
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
 
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState('');
@@ -26,7 +70,7 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
     try {
       const res = await fetch('/api/repos', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           name: name.trim(),
           description: description.trim(),
@@ -81,19 +125,9 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
     setError(null);
 
     try {
-      const cached = localStorage.getItem('teamsync_current_user');
-      let activeUser = null;
-      if (cached) {
-        try { activeUser = JSON.parse(cached); } catch (e) {}
-      }
-      const headers = { 'Content-Type': 'application/json' };
-      if (activeUser && activeUser.username) {
-        headers['X-User-Username'] = activeUser.username;
-      }
-
       const res = await fetch('/api/repos/join', {
         method: 'POST',
-        headers,
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ share_code: shareCode.trim() })
       });
 
@@ -150,16 +184,34 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <AlertTriangle size={18} />
-            <span style={{ fontSize: '13px', fontWeight: 500 }}>{reposError}</span>
+            <span style={{ fontSize: '13px', fontWeight: 500 }}>
+              {reposError}
+              {timeLeft !== null && timeLeft > 0 && (
+                <span style={{ marginLeft: '8px', color: 'var(--red)', fontWeight: 600 }}>
+                  (Resetting in {formatTimeLeft(timeLeft)})
+                </span>
+              )}
+            </span>
           </div>
           {onRetry && (
             <button 
               onClick={onRetry} 
+              disabled={timeLeft !== null && timeLeft > 0}
               className="btn-secondary" 
-              style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--red)', borderColor: 'var(--red)' }}
+              style={{ 
+                padding: '6px 12px', 
+                fontSize: '12px', 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '4px', 
+                color: 'var(--red)', 
+                borderColor: 'var(--red)',
+                opacity: (timeLeft !== null && timeLeft > 0) ? 0.5 : 1,
+                cursor: (timeLeft !== null && timeLeft > 0) ? 'not-allowed' : 'pointer'
+              }}
             >
               <RefreshCw size={13} className="retry-icon" />
-              Retry Verification
+              {timeLeft !== null && timeLeft > 0 ? 'Rate Limited' : 'Retry Verification'}
             </button>
           )}
         </div>

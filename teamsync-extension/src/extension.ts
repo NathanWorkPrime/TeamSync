@@ -20,6 +20,45 @@ let currentBranch: string = '';
 let currentSessionLink: string = '';
 let activeStatusBarItem: vscode.StatusBarItem | null = null;
 
+interface CompanionNotification {
+  id: string;
+  type: 'info' | 'warning' | 'error';
+  message: string;
+  timestamp: number;
+}
+
+const pendingNotifications: CompanionNotification[] = [];
+
+function showInfo(message: string, ...items: any[]): Thenable<any> {
+  queueNotification('info', message);
+  return vscode.window.showInformationMessage(message, ...items);
+}
+
+function showWarning(message: string, ...items: any[]): Thenable<any> {
+  queueNotification('warning', message);
+  return vscode.window.showWarningMessage(message, ...items);
+}
+
+function showError(message: string, ...items: any[]): Thenable<any> {
+  queueNotification('error', message);
+  return vscode.window.showErrorMessage(message, ...items);
+}
+
+
+function queueNotification(type: 'info' | 'warning' | 'error', message: string) {
+  const cleanMessage = message.replace(/^TeamSync( Alert)?: /, '');
+  const notification: CompanionNotification = {
+    id: Math.random().toString(36).substring(2, 9) + '-' + Date.now(),
+    type,
+    message: cleanMessage,
+    timestamp: Date.now()
+  };
+  pendingNotifications.push(notification);
+  if (pendingNotifications.length > 20) {
+    pendingNotifications.shift();
+  }
+}
+
 // Helper to make HTTP POST requests with zero dependencies
 function sendPostRequest(urlStr: string, body: any): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -211,7 +250,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (currentConflictsCount > 0) {
           const filesList = currentConflicts.map((c: any) => path.basename(c.uri.fsPath)).join(', ');
-          vscode.window.showWarningMessage(`TeamSync Alert: Merge conflicts detected in: ${filesList}. Please resolve before merging.`);
+          showWarning(`TeamSync Alert: Merge conflicts detected in: ${filesList}. Please resolve before merging.`);
 
           try {
             const repoName = path.basename(rootPath);
@@ -259,6 +298,568 @@ export function activate(context: vscode.ExtensionContext) {
   }));
 
   app.use(express.json());
+
+  // GET /notifications - Retrieve recent notifications
+  app.get('/notifications', (req: express.Request, res: express.Response) => {
+    res.json(pendingNotifications);
+  });
+
+  // POST /test-notification - Trigger a test notification for integration validation
+  app.post('/test-notification', (req: express.Request, res: express.Response) => {
+    const { type, message } = req.body;
+    const msg = message || 'Test companion notification';
+    if (type === 'error') {
+      showError(msg);
+    } else if (type === 'warning') {
+      showWarning(msg);
+    } else {
+      showInfo(msg);
+    }
+    res.json({ success: true });
+  });
+
+  // POST /test-unrelated-notification - Trigger an unpatched VS Code notification to prove isolation
+  app.post('/test-unrelated-notification', (req: express.Request, res: express.Response) => {
+    const { message } = req.body;
+    const msg = message || 'Unrelated VS Code system notification';
+    vscode.window.showInformationMessage(msg);
+    res.json({ success: true });
+  });
+
+  // GET /detect-repo-status - Check local repository status
+  app.get('/detect-repo-status', async (req: express.Request, res: express.Response) => {
+    const repo = req.query.repo as string;
+    const branch = req.query.branch as string;
+
+    if (!repo) {
+      res.status(400).json({ error: 'Repository name is required.' });
+      return;
+    }
+
+    try {
+      // Resolve path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      if (!baseDir) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const rootPath = workspaceFolders[0].uri.fsPath;
+          const parentPath = path.dirname(rootPath);
+          if (fs.existsSync(parentPath)) {
+            baseDir = parentPath;
+          }
+        }
+      }
+
+      if (!baseDir) {
+        const parentPath = path.resolve(__dirname, '../../../');
+        if (fs.existsSync(parentPath) && fs.existsSync(path.join(parentPath, 'TeamDash'))) {
+          baseDir = parentPath;
+        }
+      }
+
+      if (!baseDir) {
+        res.json({ exists: false, message: 'No base path configured' });
+        return;
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (repoBasename === 'TeamSync') {
+        const activeDashFolder = workspaceFolders?.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        } else {
+          const altDir = path.join(baseDir, 'TeamDash');
+          if (fs.existsSync(altDir)) {
+            targetDir = altDir;
+          }
+        }
+      }
+
+      if (!fs.existsSync(targetDir)) {
+        res.json({ exists: false });
+        return;
+      }
+
+      if (!fs.existsSync(path.join(targetDir, '.git'))) {
+        res.json({ exists: true, isGit: false, path: targetDir });
+        return;
+      }
+
+      let currentBranch = '';
+      try {
+        const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+        currentBranch = branchOut.stdout.trim();
+      } catch (e) {}
+
+      let isClean = true;
+      try {
+        const statusOut = await runCmd('git status --porcelain', targetDir);
+        isClean = statusOut.stdout.trim() === '';
+      } catch (e) {}
+
+      res.json({
+        exists: true,
+        isGit: true,
+        path: targetDir,
+        currentBranch,
+        isClean,
+        hasUncommittedChanges: !isClean
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /git-status - Get comprehensive local git status
+  app.get('/git-status', async (req: express.Request, res: express.Response) => {
+    const repo = req.query.repo as string;
+
+    if (!repo) {
+      res.status(400).json({ error: 'Repository name is required.' });
+      return;
+    }
+
+    try {
+      // Resolve path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      if (!baseDir) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const rootPath = workspaceFolders[0].uri.fsPath;
+          const parentPath = path.dirname(rootPath);
+          if (fs.existsSync(parentPath)) {
+            baseDir = parentPath;
+          }
+        }
+      }
+
+      if (!baseDir) {
+        const parentPath = path.resolve(__dirname, '../../../');
+        if (fs.existsSync(parentPath) && fs.existsSync(path.join(parentPath, 'TeamDash'))) {
+          baseDir = parentPath;
+        }
+      }
+
+      if (!baseDir) {
+        res.json({ exists: false, message: 'No base path configured' });
+        return;
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (repoBasename === 'TeamSync') {
+        const activeDashFolder = workspaceFolders?.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        } else {
+          const altDir = path.join(baseDir, 'TeamDash');
+          if (fs.existsSync(altDir)) {
+            targetDir = altDir;
+          }
+        }
+      }
+
+      if (!fs.existsSync(targetDir)) {
+        res.json({ exists: false });
+        return;
+      }
+
+      if (!fs.existsSync(path.join(targetDir, '.git'))) {
+        res.json({ exists: true, isGit: false, path: targetDir });
+        return;
+      }
+
+      // Check Git stats
+      let currentBranch = '';
+      try {
+        const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+        currentBranch = branchOut.stdout.trim();
+      } catch (e) {}
+
+      let currentCommitHash = '';
+      let currentCommitMessage = '';
+      try {
+        const logRes = await runCmd('git log -1 --format=%H%n%s', targetDir);
+        const logParts = logRes.stdout.trim().split('\n');
+        currentCommitHash = logParts[0] || '';
+        currentCommitMessage = logParts[1] || '';
+      } catch (e) {}
+
+      let activeRemote = '';
+      try {
+        const remoteRes = await runCmd('git remote get-url origin', targetDir);
+        activeRemote = remoteRes.stdout.trim();
+      } catch (e) {}
+
+      // Working Tree Status (staged, modified, untracked)
+      let stagedFiles: string[] = [];
+      let modifiedFiles: string[] = [];
+      let untrackedFiles: string[] = [];
+      let isClean = true;
+
+      try {
+        const statusOut = await runCmd('git status --porcelain', targetDir);
+        const lines = statusOut.stdout.split('\n');
+        for (const line of lines) {
+          if (line.length < 3) continue;
+          const status = line.slice(0, 2);
+          const file = line.slice(3).trim();
+          isClean = false;
+
+          if (status === '??') {
+            untrackedFiles.push(file);
+          } else {
+            if (status[0] !== ' ' && status[0] !== '?') {
+              stagedFiles.push(file);
+            }
+            if (status[1] !== ' ' && status[1] !== '?') {
+              modifiedFiles.push(file);
+            }
+          }
+        }
+      } catch (e) {}
+
+      // Ahead/Behind count and upstream tracking status
+      let aheadCount = 0;
+      let behindCount = 0;
+      let upstreamTrackingMissing = false;
+      try {
+        const revRes = await runCmd('git rev-list --left-right --count HEAD...@{u}', targetDir);
+        const parts = revRes.stdout.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          aheadCount = parseInt(parts[0], 10) || 0;
+          behindCount = parseInt(parts[1], 10) || 0;
+        }
+      } catch (e: any) {
+        if (e.message.includes('no upstream') || e.message.includes('no tracking info') || e.message.includes('fatal:')) {
+          upstreamTrackingMissing = true;
+        }
+      }
+
+      // Detached head check
+      let detachedHead = false;
+      try {
+        const headRes = await runCmd('git symbolic-ref -q HEAD', targetDir);
+        if (headRes.stdout.trim() === '') {
+          detachedHead = true;
+        }
+      } catch (e) {
+        detachedHead = true;
+      }
+
+      // Repo Health: check for active states (merge, rebase, cherry-pick)
+      const mergeState = fs.existsSync(path.join(targetDir, '.git', 'MERGE_HEAD'));
+      const rebaseState = fs.existsSync(path.join(targetDir, '.git', 'rebase-merge')) || fs.existsSync(path.join(targetDir, '.git', 'rebase-apply'));
+      const cherryPickState = fs.existsSync(path.join(targetDir, '.git', 'CHERRY_PICK_HEAD'));
+      const revertState = fs.existsSync(path.join(targetDir, '.git', 'REVERT_HEAD'));
+
+      // Branches list
+      let localBranches: string[] = [];
+      let remoteBranches: string[] = [];
+      try {
+        const branchesRes = await runCmd('git branch -a --format=%(refname:short)', targetDir);
+        const lines = branchesRes.stdout.split('\n');
+        for (let line of lines) {
+          line = line.trim();
+          if (!line) continue;
+          if (line.startsWith('remotes/')) {
+            const cleanRemote = line.replace('remotes/', '');
+            if (!cleanRemote.includes('HEAD')) {
+              remoteBranches.push(cleanRemote);
+            }
+          } else {
+            localBranches.push(line);
+          }
+        }
+      } catch (e) {}
+
+      // Retrieve timestamps from VS Code globalState
+      const fetchKey = `last-fetch:${repo}`;
+      const pullKey = `last-pull:${repo}`;
+      const pushKey = `last-push:${repo}`;
+
+      const lastFetch = context.globalState.get<string>(fetchKey) || '';
+      const lastPull = context.globalState.get<string>(pullKey) || '';
+      const lastPush = context.globalState.get<string>(pushKey) || '';
+
+      res.json({
+        exists: true,
+        isGit: true,
+        path: targetDir,
+        currentBranch,
+        currentCommitHash,
+        currentCommitMessage,
+        activeRemote,
+        isClean,
+        stagedFilesCount: stagedFiles.length,
+        stagedFiles,
+        modifiedFilesCount: modifiedFiles.length,
+        modifiedFiles,
+        untrackedFilesCount: untrackedFiles.length,
+        untrackedFiles,
+        aheadCount,
+        behindCount,
+        upstreamTrackingMissing,
+        detachedHead,
+        mergeState,
+        rebaseState,
+        cherryPickState,
+        revertState,
+        localBranches,
+        remoteBranches,
+        lastFetch,
+        lastPull,
+        lastPush
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /git-action - Execute Git operations on local workspace
+  app.post('/git-action', async (req: express.Request, res: express.Response) => {
+    const { action, repo, branch, force, localOnly, remoteOnly } = req.body;
+
+    if (!repo || !action) {
+      res.status(400).json({ error: 'Repository name and Git action are required.' });
+      return;
+    }
+
+    try {
+      // Resolve path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      if (!baseDir) {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+          const rootPath = workspaceFolders[0].uri.fsPath;
+          const parentPath = path.dirname(rootPath);
+          if (fs.existsSync(parentPath)) {
+            baseDir = parentPath;
+          }
+        }
+      }
+
+      if (!baseDir) {
+        const parentPath = path.resolve(__dirname, '../../../');
+        if (fs.existsSync(parentPath) && fs.existsSync(path.join(parentPath, 'TeamDash'))) {
+          baseDir = parentPath;
+        }
+      }
+
+      if (!baseDir) {
+        res.status(400).json({ error: 'Repository local directory not configured.' });
+        return;
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (repoBasename === 'TeamSync') {
+        const activeDashFolder = workspaceFolders?.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        } else {
+          const altDir = path.join(baseDir, 'TeamDash');
+          if (fs.existsSync(altDir)) {
+            targetDir = altDir;
+          }
+        }
+      }
+
+      if (!fs.existsSync(targetDir) || !fs.existsSync(path.join(targetDir, '.git'))) {
+        res.status(404).json({ error: 'Local Git repository not found.' });
+        return;
+      }
+
+      let log = '';
+      const runLogCmd = async (cmd: string) => {
+        log += `> ${cmd}\n`;
+        const resOut = await runCmd(cmd, targetDir);
+        if (resOut.stdout) log += `${resOut.stdout}\n`;
+        if (resOut.stderr) log += `${resOut.stderr}\n`;
+        return resOut;
+      };
+
+      const fetchKey = `last-fetch:${repo}`;
+      const pullKey = `last-pull:${repo}`;
+      const pushKey = `last-push:${repo}`;
+
+      if (action === 'fetch') {
+        await runLogCmd('git fetch origin');
+        await context.globalState.update(fetchKey, new Date().toISOString());
+        res.json({ success: true, log, message: 'Successfully fetched remote repository updates.' });
+        return;
+      } 
+      
+      if (action === 'pull') {
+        const targetBranch = branch || 'main';
+        await runLogCmd('git fetch origin');
+        await gitCheckoutAndSync(targetDir, targetBranch);
+        await runLogCmd(`git pull origin ${targetBranch}`);
+        await context.globalState.update(pullKey, new Date().toISOString());
+        res.json({ success: true, log, message: `Successfully pulled latest changes on ${targetBranch}.` });
+        return;
+      } 
+      
+      if (action === 'push') {
+        const targetBranch = branch || 'main';
+        await gitCheckoutAndSync(targetDir, targetBranch);
+        
+        // Check if remote upstream tracking exists
+        let hasUpstream = false;
+        try {
+          const trackingRes = await runCmd(`git rev-parse --abbrev-ref ${targetBranch}@{u}`, targetDir);
+          if (trackingRes.stdout.trim()) hasUpstream = true;
+        } catch (e) {}
+
+        if (hasUpstream) {
+          await runLogCmd(`git push origin ${targetBranch}`);
+        } else {
+          await runLogCmd(`git push -u origin ${targetBranch}`);
+        }
+        await context.globalState.update(pushKey, new Date().toISOString());
+        res.json({ success: true, log, message: `Successfully pushed commits to origin/${targetBranch}.` });
+        return;
+      } 
+      
+      if (action === 'sync') {
+        const targetBranch = branch || 'main';
+        await runLogCmd('git fetch origin');
+        await context.globalState.update(fetchKey, new Date().toISOString());
+        
+        // Checkout target branch
+        await gitCheckoutAndSync(targetDir, targetBranch);
+
+        // Check if ahead/behind
+        let aheadCount = 0;
+        let behindCount = 0;
+        let hasUpstream = false;
+        try {
+          const revRes = await runCmd(`git rev-list --left-right --count HEAD...origin/${targetBranch}`, targetDir);
+          const parts = revRes.stdout.trim().split(/\s+/);
+          if (parts.length >= 2) {
+            aheadCount = parseInt(parts[0], 10) || 0;
+            behindCount = parseInt(parts[1], 10) || 0;
+          }
+          hasUpstream = true;
+        } catch (e) {}
+
+        if (behindCount > 0) {
+          await runLogCmd(`git pull origin ${targetBranch}`);
+          await context.globalState.update(pullKey, new Date().toISOString());
+        } else {
+          log += `Already up-to-date with remote branch (0 commits behind).\n`;
+        }
+
+        if (aheadCount > 0 || !hasUpstream) {
+          if (hasUpstream) {
+            await runLogCmd(`git push origin ${targetBranch}`);
+          } else {
+            await runLogCmd(`git push -u origin ${targetBranch}`);
+          }
+          await context.globalState.update(pushKey, new Date().toISOString());
+        } else {
+          log += `Already up-to-date with remote branch (0 commits ahead).\n`;
+        }
+
+        res.json({ success: true, log, message: `Successfully synchronized ${targetBranch} with remote.` });
+        return;
+      } 
+      
+      if (action === 'stash') {
+        await runLogCmd('git stash -u');
+        res.json({ success: true, log, message: 'Successfully stashed local modifications (including untracked files).' });
+        return;
+      } 
+      
+      if (action === 'delete-branch') {
+        const targetBranch = branch;
+        if (!targetBranch) {
+          res.status(400).json({ error: 'Branch name is required for deletion.' });
+          return;
+        }
+
+        // Detect currently checked out branch
+        let currentBranchName = '';
+        try {
+          const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+          currentBranchName = branchOut.stdout.trim();
+        } catch (e) {}
+
+        if (targetBranch === currentBranchName) {
+          res.status(400).json({ error: 'Cannot delete the currently checked-out branch.' });
+          return;
+        }
+
+        let localSuccess = false;
+        let remoteSuccess = false;
+
+        if (!remoteOnly) {
+          try {
+            // Try standard delete
+            const delCmd = force ? `git branch -D ${targetBranch}` : `git branch -d ${targetBranch}`;
+            await runLogCmd(delCmd);
+            localSuccess = true;
+          } catch (delErr: any) {
+            if (delErr.message.includes('not fully merged')) {
+              res.json({
+                success: false,
+                requiresForce: true,
+                message: `Branch ${targetBranch} is not fully merged. Force delete required.`,
+                log
+              });
+              return;
+            }
+            throw delErr;
+          }
+        }
+
+        if (remoteOnly || (!localOnly && localSuccess)) {
+          try {
+            await runLogCmd(`git push origin --delete ${targetBranch}`);
+            remoteSuccess = true;
+          } catch (remoteErr: any) {
+            console.warn(`[TeamSync Companion] Remote branch deletion failed:`, remoteErr.message);
+            log += `Remote deletion failed: ${remoteErr.message}\n`;
+          }
+        }
+
+        res.json({
+          success: true,
+          log,
+          localSuccess,
+          remoteSuccess,
+          message: `Branch ${targetBranch} deleted successfully.`
+        });
+        return;
+      }
+
+      res.status(400).json({ error: `Unknown Git action: ${action}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   // GET /commands - Inspect registered IDE commands
   app.get('/commands', async (req: express.Request, res: express.Response) => {
@@ -354,7 +955,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     try {
-      vscode.window.showInformationMessage(`TeamSync: Starting collaboration session for ${repo} / ${branch}...`);
+      showInfo(`TeamSync: Starting collaboration session for ${repo} / ${branch}...`);
 
       let sessionLink = '';
       const octActive = await isRealOCTActive();
@@ -388,7 +989,7 @@ export function activate(context: vscode.ExtensionContext) {
                                '-' + 
                                Math.random().toString(36).substring(2, 6).toUpperCase();
             sessionLink = `oct://join/TS-${randomCode}`;
-            vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): No session link captured. Using mock: ${sessionLink}`);
+            showWarning(`TeamSync (Dev Mode Fallback): No session link captured. Using mock: ${sessionLink}`);
           } else {
             throw new Error('Failed to capture Eclipse OCT session link from clipboard.');
           }
@@ -405,7 +1006,7 @@ export function activate(context: vscode.ExtensionContext) {
                              '-' + 
                              Math.random().toString(36).substring(2, 6).toUpperCase();
           sessionLink = `oct://join/TS-${randomCode}`;
-          vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT command failed. Using mock: ${sessionLink}`);
+          showWarning(`TeamSync (Dev Mode Fallback): Real OCT command failed. Using mock: ${sessionLink}`);
         } else {
           throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to host sessions.');
         }
@@ -426,7 +1027,7 @@ export function activate(context: vscode.ExtensionContext) {
       activeStatusBarItem.show();
       context.subscriptions.push(activeStatusBarItem);
 
-      vscode.window.showInformationMessage(`TeamSync: Session created! Join code: ${sessionLink}`);
+      showInfo(`TeamSync: Session created! Join code: ${sessionLink}`);
 
       res.json({
         success: true,
@@ -434,7 +1035,7 @@ export function activate(context: vscode.ExtensionContext) {
         message: 'OCT session successfully created.'
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Failed to start session: ${err.message}`);
+      showError(`TeamSync: Failed to start session: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -449,7 +1050,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     try {
-      vscode.window.showInformationMessage(`TeamSync: Joining existing session for ${repo} / ${branch}...`);
+      showInfo(`TeamSync: Joining existing session for ${repo} / ${branch}...`);
 
       const octActive = await isRealOCTActive();
 
@@ -468,7 +1069,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
 
           if (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test) {
-            vscode.window.showWarningMessage(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
+            showWarning(`TeamSync (Dev Mode Fallback): Real OCT join command failed. Mocking join successfully.`);
           } else {
             throw new Error('Eclipse OCT extension is not installed or not active. Please install the Open Collaboration Tools extension to join sessions.');
           }
@@ -490,7 +1091,7 @@ export function activate(context: vscode.ExtensionContext) {
       activeStatusBarItem.show();
       context.subscriptions.push(activeStatusBarItem);
 
-      vscode.window.showInformationMessage(`TeamSync: Successfully joined session: ${session_link}`);
+      showInfo(`TeamSync: Successfully joined session: ${session_link}`);
 
       res.json({
         success: true,
@@ -498,7 +1099,7 @@ export function activate(context: vscode.ExtensionContext) {
         message: 'OCT session successfully joined.'
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Failed to join session: ${err.message}`);
+      showError(`TeamSync: Failed to join session: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -506,7 +1107,7 @@ export function activate(context: vscode.ExtensionContext) {
   // POST /leave-session
   app.post('/leave-session', async (req: express.Request, res: express.Response) => {
     try {
-      vscode.window.showInformationMessage(`TeamSync: Leaving collaboration session...`);
+      showInfo(`TeamSync: Leaving collaboration session...`);
 
       try {
         await executeOCTCommand('leave');
@@ -529,14 +1130,14 @@ export function activate(context: vscode.ExtensionContext) {
         message: 'OCT session successfully left.'
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Failed to leave session: ${err.message}`);
+      showError(`TeamSync: Failed to leave session: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
 
   // POST /clone-repo
   app.post('/clone-repo', async (req: express.Request, res: express.Response) => {
-    const { repo, branch } = req.body;
+    const { repo, branch, stash } = req.body;
 
     if (!repo || !branch) {
       res.status(400).json({ error: 'Repository name and branch name are required.' });
@@ -615,7 +1216,7 @@ export function activate(context: vscode.ExtensionContext) {
       let actionTaken = '';
 
       if (!fs.existsSync(targetDir)) {
-        vscode.window.showInformationMessage(`TeamSync: Cloning ${repo} into ${baseDir}...`);
+        showInfo(`TeamSync: Cloning ${repo} into ${baseDir}...`);
         actionTaken = 'cloned';
         const cloneUrl = `https://github.com/${repo}.git`;
         await runCmd(`git clone ${cloneUrl}`, baseDir);
@@ -626,39 +1227,63 @@ export function activate(context: vscode.ExtensionContext) {
           throw new Error(`Directory ${targetDir} exists but is not a Git repository. Target directory setting reset.`);
         }
 
-        vscode.window.showInformationMessage(`TeamSync: Updating local repository at ${targetDir}...`);
-        actionTaken = 'updated';
+        // Get currently checked out branch
+        let currentBranchName = '';
+        try {
+          const branchOut = await runCmd('git rev-parse --abbrev-ref HEAD', targetDir);
+          currentBranchName = branchOut.stdout.trim();
+        } catch (e) {}
 
-        await runCmd(`git fetch origin`, targetDir);
-        await gitCheckoutAndSync(targetDir, branch);
+        let isClean = true;
         try {
-          await runCmd(`git pull origin ${branch}`, targetDir);
-        } catch (pullErr: any) {
-          console.warn('[TeamSync Companion] git pull failed:', pullErr.message);
-          throw new Error(`Git pull failed: ${pullErr.message}`);
-        }
-        try {
-          await runCmd(`git push origin ${branch}`, targetDir);
-        } catch (pushErr: any) {
-          console.warn('[TeamSync Companion] git push failed:', pushErr.message);
-          throw new Error(`Git push failed: ${pushErr.message}`);
+          const statusOut = await runCmd('git status --porcelain', targetDir);
+          isClean = statusOut.stdout.trim() === '';
+        } catch (e) {}
+
+        if (currentBranchName === branch && isClean) {
+          // Already on correct branch and clean, just open it!
+          actionTaken = 'opened';
+          showInfo(`TeamSync: Opening existing workspace at ${targetDir}...`);
+        } else {
+          showInfo(`TeamSync: Updating local repository at ${targetDir}...`);
+          actionTaken = 'updated';
+
+          await runCmd(`git fetch origin`, targetDir);
+
+          // Handle stashing if requested and dirty
+          if (!isClean && stash === true) {
+            showInfo(`TeamSync: Stashing uncommitted changes in ${repoBasename}...`);
+            await runCmd('git stash', targetDir);
+          }
+
+          await gitCheckoutAndSync(targetDir, branch);
+          try {
+            await runCmd(`git pull origin ${branch}`, targetDir);
+          } catch (pullErr: any) {
+            console.warn('[TeamSync Companion] git pull failed:', pullErr.message);
+            throw new Error(`Git pull failed: ${pullErr.message}`);
+          }
+          try {
+            await runCmd(`git push origin ${branch}`, targetDir);
+          } catch (pushErr: any) {
+            console.warn('[TeamSync Companion] git push failed:', pushErr.message);
+            throw new Error(`Git push failed: ${pushErr.message}`);
+          }
         }
       }
 
       currentRepo = repo;
       currentBranch = branch;
 
-      vscode.window.showInformationMessage(
-        `TeamSync: Successfully ${actionTaken} ${repoBasename} (${branch})!`,
-        'Open in Antigravity'
-      ).then(async (selection) => {
-        if (selection === 'Open in Antigravity') {
-          const uri = vscode.Uri.file(targetDir);
-          await vscode.commands.executeCommand('vscode.openFolder', uri, {
-            forceNewWindow: true
-          });
-        }
+      // Automatically open the folder in VS Code
+      const uri = vscode.Uri.file(targetDir);
+      await vscode.commands.executeCommand('vscode.openFolder', uri, {
+        forceNewWindow: true
       });
+
+      showInfo(
+        `TeamSync: Successfully opened ${repoBasename} (${branch}) locally!`
+      );
 
       // Automatically launch TeamSync browser application
       vscode.env.openExternal(vscode.Uri.parse('http://localhost:5173/'));
@@ -669,7 +1294,7 @@ export function activate(context: vscode.ExtensionContext) {
         message: `Repository successfully ${actionTaken}.`
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Failed to clone/update repository: ${err.message}`);
+      showError(`TeamSync: Failed to clone/update repository: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -712,7 +1337,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      vscode.window.showInformationMessage(`TeamSync: Pulling changes for origin/${branch}...`);
+      showInfo(`TeamSync: Pulling changes for origin/${branch}...`);
       await runCmd(`git fetch origin`, targetDir);
       await gitCheckoutAndSync(targetDir, branch);
       await runCmd(`git pull origin ${branch}`, targetDir);
@@ -722,7 +1347,7 @@ export function activate(context: vscode.ExtensionContext) {
         message: `Successfully pulled changes from origin/${branch}.`
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Pull failed: ${err.message}`);
+      showError(`TeamSync: Pull failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -765,7 +1390,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      vscode.window.showInformationMessage(`TeamSync: Pushing local commits to origin/${branch}...`);
+      showInfo(`TeamSync: Pushing local commits to origin/${branch}...`);
       await gitCheckoutAndSync(targetDir, branch);
       await runCmd(`git push origin ${branch}`, targetDir);
 
@@ -774,7 +1399,7 @@ export function activate(context: vscode.ExtensionContext) {
         message: `Successfully pushed commits to origin/${branch}.`
       });
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Push failed: ${err.message}`);
+      showError(`TeamSync: Push failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
@@ -850,8 +1475,20 @@ export function activate(context: vscode.ExtensionContext) {
         await runCmd(`git merge ${sourceBranch}`, targetDir);
         
         // 4.5. Push the merge commit to remote and verify success
-        vscode.window.showInformationMessage(`TeamSync: Pushing merge commit to origin/${targetBranch}...`);
-        await runCmd(`git push origin ${targetBranch}`, targetDir);
+        showInfo(`TeamSync: Pushing merge commit to origin/${targetBranch}...`);
+        try {
+          await runCmd(`git push origin ${targetBranch}`, targetDir);
+        } catch (pushErr: any) {
+          // Push failed - undo the local merge commit to keep local in sync with remote!
+          console.warn('[TeamSync Companion] Push failed, resetting branch:', pushErr.message);
+          await runCmd(`git reset --hard origin/${targetBranch}`, targetDir).catch(() => {});
+          
+          const errMsg = pushErr.message || '';
+          if (errMsg.includes('protected branch') || errMsg.includes('Protected branch') || errMsg.includes('GH006')) {
+            throw new Error(`Blocked: ${targetBranch} is a protected branch, requires a pull request.`);
+          }
+          throw pushErr;
+        }
         
         // Post event to backend
         try {
@@ -909,8 +1546,78 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
     } catch (err: any) {
-      vscode.window.showErrorMessage(`TeamSync: Merge failed: ${err.message}`);
+      showError(`TeamSync: Merge failed: ${err.message}`);
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /git-commit - Stage and commit files
+  app.post('/git-commit', async (req: express.Request, res: express.Response) => {
+    const { repo, message, files } = req.body;
+    let log = '';
+
+    if (!repo || !message || !files || !Array.isArray(files) || files.length === 0) {
+      res.status(400).json({ error: 'Repository name, commit message, and non-empty files array are required.' });
+      return;
+    }
+
+    try {
+      // 1. Resolve repository folder path
+      const stateKey = `repo-path:${repo}`;
+      let baseDir = context.globalState.get<string>(stateKey);
+
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!baseDir && workspaceFolders && workspaceFolders.length > 0) {
+        baseDir = path.dirname(workspaceFolders[0].uri.fsPath);
+      }
+      if (!baseDir) {
+        baseDir = path.resolve(__dirname, '../../../');
+      }
+
+      const repoBasename = repo.split('/').pop() || repo;
+      let targetDir = path.join(baseDir, repoBasename);
+
+      // Map 'TeamSync' to local 'TeamDash' folder if it exists or is the active workspace
+      if (repoBasename === 'TeamSync' && workspaceFolders) {
+        const activeDashFolder = workspaceFolders.find(f => 
+          path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync'
+        );
+        if (activeDashFolder) {
+          targetDir = activeDashFolder.uri.fsPath;
+        }
+      }
+
+      if (!fs.existsSync(targetDir)) {
+        res.status(404).json({ error: `Repository directory not found at ${targetDir}.` });
+        return;
+      }
+
+      const runLogCmd = async (cmd: string) => {
+        log += `> ${cmd}\n`;
+        const resOut = await runCmd(cmd, targetDir);
+        if (resOut.stdout) log += `${resOut.stdout}\n`;
+        if (resOut.stderr) log += `${resOut.stderr}\n`;
+        return resOut;
+      };
+
+      // 2. Stage the specified files
+      for (const file of files) {
+        await runLogCmd(`git add "${file}"`);
+      }
+
+      // 3. Commit the staged changes
+      const safeMessage = message.replace(/"/g, '\\"');
+      await runLogCmd(`git commit -m "${safeMessage}"`);
+
+      res.json({
+        success: true,
+        log,
+        message: 'Successfully committed files to the local repository.'
+      });
+
+    } catch (err: any) {
+      showError(`TeamSync: Commit failed: ${err.message}`);
+      res.status(500).json({ error: err.message, log });
     }
   });
 
@@ -1137,7 +1844,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register manual status check command
   const disposable = vscode.commands.registerCommand('teamsync.checkStatus', () => {
-    vscode.window.showInformationMessage('TeamSync Companion Server is active on port 37845.');
+    showInfo('TeamSync Companion Server is active on port 37845.');
     sendHeartbeat();
   });
 

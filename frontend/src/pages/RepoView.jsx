@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { projectCache } from '../utils/projectCache';
 import BranchMap from '../components/BranchMap';
 import KanbanBoard from '../components/KanbanBoard';
 import Session from './Session';
 import Integrations from './Integrations';
+import GitActionCenter from '../components/GitActionCenter';
 import { 
   GitBranch, 
   FileText, 
@@ -21,7 +23,9 @@ import {
   AlertCircle,
   MessageSquare,
   Settings,
-  BarChart2
+  BarChart2,
+  Monitor,
+  RefreshCw
 } from 'lucide-react';
 
 export default function RepoView({ 
@@ -33,6 +37,7 @@ export default function RepoView({
   users, 
   activePresence, 
   currentUser, 
+  fetchBranches,
   onWorkOnBranch, 
   onAddTicket, 
   onUpdateTicketStatus,
@@ -49,9 +54,39 @@ export default function RepoView({
   onAddUser,
   onRemoveUser
 }) {
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
+
+  const [visitedTabs, setVisitedTabs] = useState({
+    sessions: true,
+    source_control: true,
+    deployments: true,
+    tasks: true,
+    overview: true
+  });
+
   const [localSubTab, setLocalSubTab] = useState('sessions');
   const subTab = propsSubTab !== undefined ? propsSubTab : localSubTab;
   const setSubTab = onTabChange !== undefined ? onTabChange : setLocalSubTab;
+
+  const handleTabClick = (tabId) => {
+    setSubTab(tabId);
+    setVisitedTabs(prev => ({ ...prev, [tabId]: true }));
+  };
+
   const [showNewTicketModal, setShowNewTicketModal] = useState(false);
   const [selectedTicket, setSelectedTicket] = useState(null);
   
@@ -73,10 +108,37 @@ export default function RepoView({
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
 
+  // Local Git Workspace integration state
+  const [activeOperations, setActiveOperations] = useState({}); // { [branchName]: 'status_message' }
+  const [localWarningModal, setLocalWarningModal] = useState({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
+  const [localGitStatus, setLocalGitStatus] = useState(null);
+  const [companionOnline, setCompanionOnline] = useState(false);
+
+  const fetchLocalGitStatus = async () => {
+    try {
+      const res = await fetch(`http://localhost:37845/git-status?repo=${githubRepo || repoName}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setLocalGitStatus(data.exists ? data : null);
+      setCompanionOnline(true);
+    } catch (err) {
+      setCompanionOnline(false);
+      setLocalGitStatus(null);
+    }
+  };
+
+  useEffect(() => {
+    fetchLocalGitStatus();
+    const interval = setInterval(fetchLocalGitStatus, 5000);
+    return () => clearInterval(interval);
+  }, [repoName, githubRepo]);
+
   // Docs state
   const [docs, setDocs] = useState([]);
   const [docsLoading, setDocsLoading] = useState(true);
   const [selectedDoc, setSelectedDoc] = useState(null);
+  const [deleteBranchModal, setDeleteBranchModal] = useState({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+  const [postMergeCleanupModal, setPostMergeCleanupModal] = useState({ isOpen: false, branchName: '', remember: false });
   const [docSearch, setDocSearch] = useState('');
   const [docTypeFilter, setDocTypeFilter] = useState('');
   const [showNewDocModal, setShowNewDocModal] = useState(false);
@@ -119,10 +181,20 @@ export default function RepoView({
   // Fetch overview data
   const fetchOverviewData = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/overview`);
+      if (overview === null) {
+        const cached = projectCache.getTabData(repoName, 'overview');
+        if (cached) {
+          setOverview(cached);
+          setOverviewLoading(false);
+        }
+      }
+      const res = await fetch(`/api/repos/${repoName}/overview`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setOverview(data);
+        projectCache.setTabData(repoName, 'overview', data);
       }
     } catch (err) {
       console.error('Error fetching repo overview:', err);
@@ -134,14 +206,26 @@ export default function RepoView({
   // Fetch documents
   const fetchDocs = async () => {
     try {
+      if (docs.length === 0 && !docSearch && !docTypeFilter) {
+        const cached = projectCache.getTabData(repoName, 'docs');
+        if (cached) {
+          setDocs(cached);
+          setDocsLoading(false);
+        }
+      }
       let url = `/api/docs?repo_name=${repoName}`;
       if (docSearch) url += `&search=${encodeURIComponent(docSearch)}`;
       if (docTypeFilter) url += `&doc_type=${docTypeFilter}`;
       
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDocs(data);
+        if (!docSearch && !docTypeFilter) {
+          projectCache.setTabData(repoName, 'docs', data);
+        }
         // If a document is selected, refresh its content in details panel
         if (selectedDoc) {
           const refreshed = data.find(d => d.id === selectedDoc.id);
@@ -162,10 +246,20 @@ export default function RepoView({
   // Fetch tasks
   const fetchTasks = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/tasks`);
+      if (tasks.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'tasks');
+        if (cached) {
+          setTasks(cached);
+          setTasksLoading(false);
+        }
+      }
+      const res = await fetch(`/api/repos/${repoName}/tasks`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
+        projectCache.setTabData(repoName, 'tasks', data);
       }
     } catch (err) {
       console.error('Error fetching tasks:', err);
@@ -182,7 +276,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/tasks`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           title: newTaskTitle,
           description: newTaskDescription,
@@ -191,6 +285,7 @@ export default function RepoView({
         })
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'tasks');
         fetchTasks();
         setShowNewTaskModal(false);
         setNewTaskTitle('');
@@ -212,10 +307,11 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload)
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'tasks');
         fetchTasks();
       }
     } catch (err) {
@@ -226,10 +322,20 @@ export default function RepoView({
   // Fetch deployments
   const fetchDeployments = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/deployments`);
+      if (deployments.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'deployments');
+        if (cached) {
+          setDeployments(cached);
+          setDeploymentsLoading(false);
+        }
+      }
+      const res = await fetch(`/api/repos/${repoName}/deployments`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDeployments(data);
+        projectCache.setTabData(repoName, 'deployments', data);
       }
     } catch (err) {
       console.error('Error fetching deployments:', err);
@@ -241,7 +347,9 @@ export default function RepoView({
   // Fetch deployment status
   const fetchDeployStatus = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/deploy/status`);
+      const res = await fetch(`/api/repos/${repoName}/deploy/status`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setDeployStatus(data.status);
@@ -257,7 +365,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/deploy`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: 'main',
           user_id: currentUser?.id || 1,
@@ -265,6 +373,7 @@ export default function RepoView({
         })
       });
       if (res.ok) {
+        projectCache.clearCache(repoName, 'deployments');
         await fetchDeployments();
         setTimeout(fetchDeployStatus, 2000);
       } else {
@@ -279,10 +388,20 @@ export default function RepoView({
   // Fetch session rooms history
   const fetchSessionHistory = async () => {
     try {
-      const res = await fetch(`/api/repos/${repoName}/sessions`);
+      if (sessionHistory.length === 0) {
+        const cached = projectCache.getTabData(repoName, 'sessions');
+        if (cached) {
+          setSessionHistory(cached);
+          setSessionHistoryLoading(false);
+        }
+      }
+      const res = await fetch(`/api/repos/${repoName}/sessions`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setSessionHistory(data);
+        projectCache.setTabData(repoName, 'sessions', data);
       }
     } catch (err) {
       console.error('Error fetching session history:', err);
@@ -291,14 +410,14 @@ export default function RepoView({
     }
   };
 
-  // Periodically poll session history when Sessions tab is active
+  // Poll sessions when tab is visited
   useEffect(() => {
-    if (repoName && subTab === 'sessions') {
+    if (repoName && visitedTabs.sessions) {
       fetchSessionHistory();
       const interval = setInterval(fetchSessionHistory, 5000);
       return () => clearInterval(interval);
     }
-  }, [repoName, subTab]);
+  }, [repoName, visitedTabs.sessions]);
 
   // Set default branch for new session selector
   useEffect(() => {
@@ -307,24 +426,51 @@ export default function RepoView({
     }
   }, [branches, selectedStartBranch]);
 
-  // Poll for overview, docs, tasks, and deployments periodically
+  // Poll overview/docs when tab is visited
   useEffect(() => {
-    fetchOverviewData();
-    fetchDocs();
-    fetchTasks();
-    fetchDeployments();
-    fetchDeployStatus();
-
-    const interval = setInterval(() => {
+    if (repoName && visitedTabs.overview) {
       fetchOverviewData();
       fetchDocs();
+      const interval = setInterval(() => {
+        fetchOverviewData();
+        fetchDocs();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.overview, docSearch, docTypeFilter]);
+
+  // Poll tasks when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.tasks) {
       fetchTasks();
+      const interval = setInterval(fetchTasks, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.tasks]);
+
+  // Poll deployments when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.deployments) {
       fetchDeployments();
       fetchDeployStatus();
-    }, 5000);
+      const interval = setInterval(() => {
+        fetchDeployments();
+        fetchDeployStatus();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.deployments]);
 
-    return () => clearInterval(interval);
-  }, [repoName, docSearch, docTypeFilter]);
+  // Poll branches when tab is visited
+  useEffect(() => {
+    if (repoName && visitedTabs.source_control && fetchBranches) {
+      fetchBranches(repoName);
+      const interval = setInterval(() => {
+        fetchBranches(repoName);
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [repoName, visitedTabs.source_control]);
 
   // Handle ticket submission
   const handleCreateTicketSubmit = (e) => {
@@ -372,7 +518,7 @@ export default function RepoView({
 
       const res = await fetch('/api/docs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload)
       });
 
@@ -400,7 +546,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/docs/${selectedDoc.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           title: editDocTitle,
           content: editDocContent,
@@ -425,7 +571,8 @@ export default function RepoView({
     if (!confirm('Are you sure you want to delete this document?')) return;
     try {
       const res = await fetch(`/api/docs/${id}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: getHeaders()
       });
       if (res.ok) {
         setSelectedDoc(null);
@@ -517,6 +664,8 @@ export default function RepoView({
   };
 
   const handleWorkOnBranchWrapper = async (branchName, isJoined) => {
+    projectCache.clearCache(repoName, 'sessions');
+    projectCache.clearCache(repoName, 'branches');
     await onWorkOnBranch(branchName, isJoined);
     if (!isJoined) {
       setActiveSessionBranch(branchName);
@@ -526,8 +675,237 @@ export default function RepoView({
   };
 
   const handleLeaveSessionWrapper = async (roomId) => {
+    projectCache.clearCache(repoName, 'sessions');
+    projectCache.clearCache(repoName, 'branches');
     await onLeaveSession(roomId);
     setActiveSessionBranch(null);
+  };
+
+  const executeCloneOrCheckout = async (branchName, stashChanges, initialStatus) => {
+    setActiveOperations(prev => ({ ...prev, [branchName]: initialStatus }));
+    try {
+      const res = await fetch('http://localhost:37845/clone-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: githubRepo || repoName,
+          branch: branchName,
+          stash: stashChanges
+        })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Server returned ${res.status}`);
+      }
+      
+      // Update status to Opening workspace...
+      setActiveOperations(prev => ({ ...prev, [branchName]: 'Opening workspace...' }));
+      
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      setActiveOperations(prev => ({ ...prev, [branchName]: 'Success!' }));
+      setTimeout(() => {
+        setActiveOperations(prev => {
+          const next = { ...prev };
+          delete next[branchName];
+          return next;
+        });
+      }, 2000);
+    } catch (err) {
+      console.error('[View Locally] Error switching branch:', err);
+      alert(`Failed to view branch locally: ${err.message}`);
+      setActiveOperations(prev => {
+        const next = { ...prev };
+        delete next[branchName];
+        return next;
+      });
+    }
+  };
+
+  const handleViewLocally = async (branchName) => {
+    setActiveOperations(prev => ({ ...prev, [branchName]: 'Checking local repository...' }));
+    try {
+      const res = await fetch(`http://localhost:37845/detect-repo-status?repo=${githubRepo || repoName}&branch=${branchName}`);
+      if (!res.ok) {
+        throw new Error(`Companion server returned status ${res.status}`);
+      }
+      const status = await res.json();
+      
+      let nextStep = 'Syncing workspace...';
+      if (!status.exists) {
+        nextStep = 'Cloning repository...';
+      } else if (status.isGit) {
+        if (status.currentBranch !== branchName) {
+          nextStep = 'Checking out branch...';
+        } else {
+          nextStep = 'Fetching latest changes...';
+        }
+      }
+
+      if (status.exists && status.isGit && status.hasUncommittedChanges) {
+        setLocalWarningModal({
+          isOpen: true,
+          branchName,
+          currentBranch: status.currentBranch || 'unknown',
+          path: status.path,
+          nextStep,
+          isCurrentBranch: status.currentBranch === branchName
+        });
+        setActiveOperations(prev => {
+          const next = { ...prev };
+          delete next[branchName];
+          return next;
+        });
+      } else {
+        await executeCloneOrCheckout(branchName, false, nextStep);
+      }
+    } catch (err) {
+      console.error('[View Locally] Error detecting status:', err);
+      alert(`Failed to connect to TeamSync Companion. Make sure VS Code is open and active.\nError: ${err.message}`);
+      setActiveOperations(prev => {
+        const next = { ...prev };
+        delete next[branchName];
+        return next;
+      });
+    }
+  };
+
+  const triggerDeleteBranch = (branchName) => {
+    setDeleteBranchModal({
+      isOpen: true,
+      branchName,
+      force: false,
+      localOnly: false,
+      remoteOnly: false,
+      isDeleting: false
+    });
+  };
+
+  const handleDeleteBranchConfirm = async () => {
+    setDeleteBranchModal(prev => ({ ...prev, isDeleting: true }));
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: deleteBranchModal.branchName,
+          force: deleteBranchModal.force,
+          localOnly: deleteBranchModal.localOnly,
+          remoteOnly: deleteBranchModal.remoteOnly
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || (data.success === false && !data.requiresForce)) {
+        throw new Error(data.error || data.message || `Server returned ${res.status}`);
+      }
+
+      if (data.requiresForce) {
+        if (window.confirm(`Branch ${deleteBranchModal.branchName} contains unmerged commits. Force delete local branch?`)) {
+          setDeleteBranchModal(prev => ({ ...prev, force: true, isDeleting: false }));
+          setTimeout(() => {
+            executeDeleteBranchWithForce(deleteBranchModal.branchName, deleteBranchModal.localOnly, deleteBranchModal.remoteOnly);
+          }, 100);
+          return;
+        } else {
+          setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+          return;
+        }
+      }
+
+      alert(`Successfully deleted branch ${deleteBranchModal.branchName}.`);
+      setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+      
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Delete Branch] Error:', err);
+      alert(`Failed to delete branch: ${err.message}`);
+      setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+    }
+  };
+
+  const executeDeleteBranchWithForce = async (branchName, localOnly, remoteOnly) => {
+    setDeleteBranchModal(prev => ({ ...prev, isDeleting: true, force: true }));
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: branchName,
+          force: true,
+          localOnly,
+          remoteOnly
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || data.message || `Server returned ${res.status}`);
+      }
+
+      alert(`Successfully force deleted branch ${branchName}.`);
+      setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false });
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Force Delete Branch] Error:', err);
+      alert(`Failed to delete branch: ${err.message}`);
+      setDeleteBranchModal(prev => ({ ...prev, isDeleting: false }));
+    }
+  };
+
+  const handleMergeSuccess = (sourceBranch) => {
+    projectCache.clearCache(repoName, 'branches');
+    projectCache.clearCache(repoName, 'sessions');
+    
+    fetchBranches();
+    fetchLocalGitStatus();
+
+    const pref = localStorage.getItem('teamsync_post_merge_delete_pref');
+    if (pref === 'always') {
+      executePostMergeCleanup(sourceBranch);
+    } else if (pref !== 'never') {
+      setPostMergeCleanupModal({
+        isOpen: true,
+        branchName: sourceBranch,
+        remember: false
+      });
+    } else {
+      alert(`Merge completed successfully on ${sourceBranch}!`);
+    }
+  };
+
+  const executePostMergeCleanup = async (branchName) => {
+    try {
+      const res = await fetch('http://localhost:37845/git-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-branch',
+          repo: githubRepo || repoName,
+          branch: branchName,
+          force: true
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(`Successfully cleaned up and deleted merged branch ${branchName} locally and remotely.`);
+      } else {
+        alert(`Merge succeeded, but post-merge branch cleanup failed: ${data.error || data.message || 'Unknown error'}`);
+      }
+      fetchBranches();
+      fetchLocalGitStatus();
+      projectCache.clearCache(repoName, 'branches');
+    } catch (err) {
+      console.error('[Post-Merge Cleanup] Error:', err);
+    }
   };
 
   const handleRollback = (deployment) => {
@@ -540,7 +918,7 @@ export default function RepoView({
     try {
       const res = await fetch(`/api/repos/${repoName}/deploy`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: rollbackTarget.branch_name,
           commit_hash: rollbackTarget.commit_hash,
@@ -612,7 +990,7 @@ export default function RepoView({
             return (
               <div
                 key={item.id}
-                onClick={() => setSubTab(item.id)}
+                onClick={() => handleTabClick(item.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -634,6 +1012,14 @@ export default function RepoView({
             );
           })}
         </div>
+
+        <GitActionCenter
+          repoName={repoName}
+          githubRepo={githubRepo}
+          status={localGitStatus}
+          companionOnline={companionOnline}
+          onRefreshStatus={fetchLocalGitStatus}
+        />
       </div>
 
       {/* Main Content Area */}
@@ -819,14 +1205,13 @@ export default function RepoView({
 
         {/* Subview Content Area */}
         <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <>
           
           {/* OVERVIEW SUBVIEW (TONED DOWN) */}
           {subTab === 'overview' && (
             <div className="subview active">
               {overviewLoading ? (
-                <div style={{ color: 'var(--text-dim)', padding: '40px 0', textAlign: 'center' }}>
-                  Loading project metrics...
-                </div>
+                <OverviewSkeleton />
               ) : overview ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '28px' }}>
                   {/* Left Column: Repository details */}
@@ -926,6 +1311,14 @@ export default function RepoView({
                 currentUser={currentUser}
                 repoName={repoName}
                 githubRepo={githubRepo}
+                loading={!branches || branches.length === 0}
+                activeOperations={activeOperations}
+                onViewLocally={handleViewLocally}
+                onDeleteBranch={triggerDeleteBranch}
+                fetchBranches={fetchBranches}
+                onMergeSuccess={handleMergeSuccess}
+                companionOnline={companionOnline}
+                localGitStatus={localGitStatus}
               />
             </div>
           )}
@@ -969,7 +1362,7 @@ export default function RepoView({
               </div>
 
               {tasksLoading ? (
-                <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '40px' }}>Loading tasks...</div>
+                <TasksSkeleton />
               ) : (
                 <div style={{ flexGrow: 1, minHeight: 0 }}>
                   <KanbanBoard 
@@ -1029,6 +1422,8 @@ export default function RepoView({
                     embedded={true}
                     onLeaveSession={handleLeaveSessionWrapper}
                   />
+                ) : sessionHistoryLoading ? (
+                  <SessionsSkeleton />
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
                     
@@ -1108,19 +1503,49 @@ export default function RepoView({
                                     </div>
                                   ))}
                                 </div>
-                                <button 
-                                  className="btn-primary" 
-                                  style={{ padding: '6px 14px', fontSize: '12px' }}
-                                  onClick={() => {
-                                    if (sess.members.some(m => m.user_id === currentUser.id)) {
-                                      setActiveSessionBranch(sess.branch);
-                                    } else {
-                                      handleWorkOnBranchWrapper(sess.branch, false);
-                                    }
-                                  }}
-                                >
-                                  {sess.members.some(m => m.user_id === currentUser.id) ? 'Enter Room' : (sess.sessionLink ? 'Join Session' : 'Work on Branch')}
-                                </button>
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                  <button
+                                    className="btn-secondary"
+                                    style={{
+                                      padding: '6px 12px',
+                                      fontSize: '12px',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '4px',
+                                      color: activeOperations[sess.branch] ? 'var(--teal)' : 'var(--text-dim)',
+                                      cursor: activeOperations[sess.branch] ? 'not-allowed' : 'pointer',
+                                      border: '1px solid var(--border)',
+                                      background: 'rgba(255,255,255,0.02)'
+                                    }}
+                                    onClick={() => handleViewLocally(sess.branch)}
+                                    disabled={!!activeOperations[sess.branch]}
+                                  >
+                                    {activeOperations[sess.branch] ? (
+                                      <>
+                                        <RefreshCw size={12} className="spin" />
+                                        <span>{activeOperations[sess.branch]}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Monitor size={12} />
+                                        <span>View Locally</span>
+                                      </>
+                                    )}
+                                  </button>
+                                  <button 
+                                    className="btn-primary" 
+                                    style={{ padding: '6px 14px', fontSize: '12px' }}
+                                    onClick={() => {
+                                      if (sess.members.some(m => m.user_id === currentUser.id)) {
+                                        setActiveSessionBranch(sess.branch);
+                                      } else {
+                                        handleWorkOnBranchWrapper(sess.branch, false);
+                                      }
+                                    }}
+                                  >
+                                    {sess.members.some(m => m.user_id === currentUser.id) ? 'Enter Room' : (sess.sessionLink ? 'Join Session' : 'Work on Branch')}
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -1418,7 +1843,7 @@ export default function RepoView({
                     </div>
 
                     {deploymentsLoading ? (
-                      <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '24px' }}>Loading history...</div>
+                      <DeploymentsSkeleton />
                     ) : deployments.length === 0 ? (
                       <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '24px', fontSize: '13px', fontStyle: 'italic', lineHeight: 1.5 }}>
                         {isSandbox ? (
@@ -1565,6 +1990,7 @@ export default function RepoView({
               />
             </div>
           )}
+            </>
         </div>
       </div>
 
@@ -2060,6 +2486,322 @@ export default function RepoView({
           </div>
         </div>
       )}
+
+      {/* Local Git Workspace Warning Modal */}
+      {localWarningModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '480px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--amber)', boxShadow: '0 8px 32px rgba(245,158,11,0.1)' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--amber)', margin: '0 0 16px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              ⚠️ Uncommitted Local Changes
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: '0 0 20px 0' }}>
+              {localWarningModal.isCurrentBranch ? (
+                <>
+                  Your local repository copy has uncommitted changes on the active branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
+                  <br /><br />
+                  Opening this branch in your local editor is safe, but fetching or pulling remote updates could cause conflicts with your local changes. What would you like to do?
+                </>
+              ) : (
+                <>
+                  Your local repository copy has uncommitted changes on branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
+                  <br /><br />
+                  Switching to branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.branchName}</strong> may cause Git checkout conflicts. What would you like to do?
+                </>
+              )}
+            </p>
+            
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false })}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Cancel
+              </button>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  executeCloneOrCheckout(localWarningModal.branchName, false, localWarningModal.nextStep);
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', border: '1px solid var(--border)' }}
+              >
+                {localWarningModal.isCurrentBranch ? 'Open anyway' : 'Checkout anyway'}
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={() => {
+                  const statusMsg = localWarningModal.isCurrentBranch ? 'Stashing changes & opening...' : 'Stashing changes & switching...';
+                  executeCloneOrCheckout(localWarningModal.branchName, true, statusMsg);
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', background: 'var(--teal)', borderColor: 'var(--teal)' }}
+              >
+                {localWarningModal.isCurrentBranch ? 'Stash & Open' : 'Stash & Switch'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Branch Deletion Modal */}
+      {deleteBranchModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '460px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--red)', margin: 0 }}>
+              🗑️ Delete Branch
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
+              Are you sure you want to delete branch <strong className="mono" style={{ color: 'var(--teal)' }}>{deleteBranchModal.branchName}</strong>?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(0,0,0,0.15)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                <input 
+                  type="checkbox" 
+                  checked={!deleteBranchModal.remoteOnly}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, localOnly: !e.target.checked ? false : prev.localOnly, remoteOnly: !e.target.checked ? true : false }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Delete branch locally</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                <input 
+                  type="checkbox" 
+                  checked={!deleteBranchModal.localOnly}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, remoteOnly: !e.target.checked ? false : prev.remoteOnly, localOnly: !e.target.checked ? true : false }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Delete remote branch (origin/{deleteBranchModal.branchName})</span>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '4px', color: deleteBranchModal.force ? 'var(--red)' : 'var(--text-dim)' }}>
+                <input 
+                  type="checkbox" 
+                  checked={deleteBranchModal.force}
+                  onChange={(e) => setDeleteBranchModal(prev => ({ ...prev, force: e.target.checked }))}
+                  disabled={deleteBranchModal.isDeleting}
+                />
+                <span>Force delete (discard unmerged changes)</span>
+              </label>
+            </div>
+
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => setDeleteBranchModal({ isOpen: false, branchName: '', force: false, localOnly: false, remoteOnly: false, isDeleting: false })}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+                disabled={deleteBranchModal.isDeleting}
+              >
+                Cancel
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={handleDeleteBranchConfirm}
+                style={{ padding: '8px 16px', fontSize: '13px', backgroundColor: 'var(--red)', borderColor: 'var(--red)', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                disabled={deleteBranchModal.isDeleting}
+              >
+                {deleteBranchModal.isDeleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post-Merge Cleanup Modal */}
+      {postMergeCleanupModal.isOpen && (
+        <div className="modal-overlay" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div className="modal-card" style={{ width: '460px', padding: '28px', borderRadius: '14px', background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--teal)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              ✨ Merge Completed Successfully!
+            </h3>
+            
+            <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: 0 }}>
+              The feature branch <strong className="mono" style={{ color: 'var(--teal)' }}>{postMergeCleanupModal.branchName}</strong> has been successfully merged.
+              Would you like to clean up and delete its local and remote copies?
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '13px', color: 'var(--text-dim)' }}>
+                <input 
+                  type="checkbox" 
+                  checked={postMergeCleanupModal.remember}
+                  onChange={(e) => setPostMergeCleanupModal(prev => ({ ...prev, remember: e.target.checked }))}
+                />
+                <span>Remember this preference in the future (always delete)</span>
+              </label>
+            </div>
+
+            <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button 
+                type="button" 
+                className="btn-secondary" 
+                onClick={() => {
+                  if (postMergeCleanupModal.remember) {
+                    localStorage.setItem('teamsync_post_merge_delete_pref', 'never');
+                  }
+                  setPostMergeCleanupModal({ isOpen: false, branchName: '', remember: false });
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
+              >
+                Keep Branch
+              </button>
+              <button 
+                type="button" 
+                className="btn-primary" 
+                onClick={async () => {
+                  if (postMergeCleanupModal.remember) {
+                    localStorage.setItem('teamsync_post_merge_delete_pref', 'always');
+                  }
+                  const branchToClean = postMergeCleanupModal.branchName;
+                  setPostMergeCleanupModal({ isOpen: false, branchName: '', remember: false });
+                  await executePostMergeCleanup(branchToClean);
+                }}
+                style={{ padding: '8px 16px', fontSize: '13px', backgroundColor: 'var(--teal)', borderColor: 'var(--teal)', cursor: 'pointer' }}
+              >
+                Clean Up Branch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const OverviewSkeleton = () => (
+  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '28px', width: '100%' }}>
+    {/* Left Column */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* Description Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '14px', width: '120px', marginBottom: '12px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '100%', marginBottom: '8px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '90%', marginBottom: '8px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '12px', width: '40%', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '12px', width: '80px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '50px', borderRadius: '4px' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '12px', width: '90px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '30px', borderRadius: '4px' }} />
+          </div>
+        </div>
+      </div>
+      {/* Team presence Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '14px', width: '150px', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+          <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+        </div>
+      </div>
+    </div>
+    {/* Right Column */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* Docs Card */}
+      <div className="card" style={{ padding: '20px', minHeight: 'auto' }}>
+        <div className="skeleton" style={{ height: '16px', width: '140px', marginBottom: '16px', borderRadius: '4px' }} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+          <div className="skeleton" style={{ height: '40px', width: '100%', borderRadius: '6px' }} />
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const SessionsSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: '28px', width: '100%' }}>
+    {/* Active Rooms */}
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div className="skeleton" style={{ height: '22px', width: '220px', borderRadius: '4px' }} />
+        <div className="skeleton" style={{ height: '32px', width: '150px', borderRadius: '6px' }} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '20px' }}>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px', minHeight: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div className="skeleton" style={{ height: '16px', width: '120px', borderRadius: '4px' }} />
+              <div className="skeleton" style={{ height: '16px', width: '80px', borderRadius: '4px' }} />
+            </div>
+            <div className="skeleton" style={{ height: '14px', width: '100%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '32px', width: '110px', borderRadius: '6px' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+    {/* Session History */}
+    <div>
+      <div className="skeleton" style={{ height: '22px', width: '150px', marginBottom: '16px', borderRadius: '4px' }} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px', minHeight: 'auto' }}>
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+              <div className="skeleton" style={{ height: '32px', width: '32px', borderRadius: '50%' }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flexGrow: 1 }}>
+                <div className="skeleton" style={{ height: '14px', width: '120px', borderRadius: '4px' }} />
+                <div className="skeleton" style={{ height: '12px', width: '80px', borderRadius: '4px' }} />
+              </div>
+            </div>
+            <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '40%', borderRadius: '4px' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const TasksSkeleton = () => (
+  <div style={{ display: 'flex', gap: '20px', overflowX: 'auto', paddingBottom: '16px', width: '100%' }}>
+    {['To Do', 'In Progress', 'In Review', 'Done'].map(column => (
+      <div key={column} style={{ flex: '1 0 280px', background: 'var(--surface)', borderRadius: '12px', border: '1px solid var(--border)', padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="skeleton" style={{ height: '16px', width: '100px', borderRadius: '4px' }} />
+          <div className="skeleton" style={{ height: '16px', width: '24px', borderRadius: '50%' }} />
+        </div>
+        {[1, 2].map(n => (
+          <div key={n} className="card" style={{ padding: '16px', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'auto' }}>
+            <div className="skeleton" style={{ height: '14px', width: '80%', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div className="skeleton" style={{ height: '10px', width: '50px', borderRadius: '4px' }} />
+              <div className="skeleton" style={{ height: '20px', width: '20px', borderRadius: '50%' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    ))}
+  </div>
+);
+
+const DeploymentsSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', width: '100%' }}>
+    <div className="skeleton" style={{ height: '20px', width: '180px', borderRadius: '4px' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      {[1, 2].map(n => (
+        <div key={n} className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'auto' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <div className="skeleton" style={{ height: '14px', width: '220px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '16px', width: '70px', borderRadius: '4px' }} />
+          </div>
+          <div className="skeleton" style={{ height: '12px', width: '100%', borderRadius: '4px' }} />
+        </div>
+      ))}
+    </div>
+  </div>
+);

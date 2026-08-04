@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { projectCache } from './utils/projectCache';
+import { Info, AlertTriangle, X } from 'lucide-react';
 import Topbar from './components/Topbar';
 import Login from './pages/Login';
 import Home from './pages/Home';
@@ -19,11 +21,60 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [repos, setRepos] = useState([]);
   const [reposError, setReposError] = useState(null);
+  const [reposErrorResetAt, setReposErrorResetAt] = useState(null);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [branches, setBranches] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [integrations, setIntegrations] = useState([]);
   const [activePresence, setActivePresence] = useState([]);
+  
+  // Toast notifications state
+  const [toasts, setToasts] = useState([]);
+  const seenNotificationIds = useRef(new Set());
+
+  const addToast = (type, message) => {
+    const id = Math.random().toString(36).substring(2, 9) + '-' + Date.now();
+    setToasts(prev => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
+  const removeToast = (id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  // Poll companion extension notifications every 2 seconds
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let isMounted = true;
+    
+    const pollNotifications = async () => {
+      try {
+        const res = await fetch('http://localhost:37845/notifications');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!Array.isArray(data) || !isMounted) return;
+        
+        const newNotifications = data.filter(n => !seenNotificationIds.current.has(n.id));
+        newNotifications.forEach(n => {
+          seenNotificationIds.current.add(n.id);
+          addToast(n.type, n.message);
+        });
+      } catch (e) {
+        // Companion is offline, ignore gracefully
+      }
+    };
+
+    pollNotifications();
+    const interval = setInterval(pollNotifications, 2000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [currentUser]);
   
   // Home Page Aggregated State
   const [todayData, setTodayData] = useState({
@@ -46,7 +97,7 @@ export default function App() {
   // Fetch initial seed users
   const fetchUsers = async () => {
     try {
-      const res = await fetch('/api/users');
+      const res = await fetch('/api/users?_t=' + Date.now());
       if (res.ok) {
         const data = await res.json();
         setUsers(data);
@@ -60,22 +111,26 @@ export default function App() {
   const fetchRepos = async () => {
     try {
       setReposError(null);
+      setReposErrorResetAt(null);
       const headers = {};
       const cached = localStorage.getItem('teamsync_current_user');
       let activeUser = currentUser;
       if (!activeUser && cached) {
         try { activeUser = JSON.parse(cached); } catch (e) {}
       }
-      if (activeUser) {
-        headers['X-User-Username'] = activeUser.username;
+      if (activeUser && activeUser.session_token) {
+        headers['X-User-Session'] = activeUser.session_token;
       }
-      const res = await fetch('/api/repos', { headers });
+      const res = await fetch('/api/repos?_t=' + Date.now(), { headers });
       if (res.ok) {
         const data = await res.json();
         setRepos(data);
       } else {
         const errData = await res.json().catch(() => ({}));
         setReposError(errData.message || 'Failed to verify repository access.');
+        if (errData.resetAt) {
+          setReposErrorResetAt(errData.resetAt);
+        }
       }
     } catch (err) {
       console.error('Error fetching repos:', err);
@@ -129,6 +184,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setBranches(data);
+        projectCache.setTabData(repoName, 'branches', data);
       }
     } catch (err) {
       console.error(`Error fetching branches for ${repoName}:`, err);
@@ -149,6 +205,11 @@ export default function App() {
     }
   };
 
+  const clearStorage = () => {
+    localStorage.removeItem('teamsync_current_user');
+    localStorage.removeItem('session_token');
+  };
+
   // Initial load
   useEffect(() => {
     fetchUsers();
@@ -156,7 +217,9 @@ export default function App() {
     // Handle GitHub OAuth callback redirect
     const urlParams = new URLSearchParams(window.location.search);
     const oauthUsername = urlParams.get('username');
-    if (oauthUsername) {
+    const sessionToken = urlParams.get('session_token');
+    if (oauthUsername && sessionToken) {
+      clearStorage();
       // Clear URL parameters
       window.history.replaceState({}, document.title, window.location.pathname);
       
@@ -166,6 +229,7 @@ export default function App() {
         .then(usersList => {
           const matchedUser = usersList.find(u => u.username === oauthUsername.toLowerCase().trim());
           if (matchedUser) {
+            matchedUser.session_token = sessionToken;
             handleLogin(matchedUser);
           }
         })
@@ -249,20 +313,10 @@ export default function App() {
       fetchPresence();
       fetchTodayData();
       fetchRepos();
-      if (selectedRepo) {
-        fetchBranches(selectedRepo);
-      }
     }, 5000);
 
     return () => clearInterval(interval);
   }, [currentUser, selectedRepo]);
-
-  // Load branches when a repository is selected
-  useEffect(() => {
-    if (selectedRepo) {
-      fetchBranches(selectedRepo);
-    }
-  }, [selectedRepo]);
 
   // Handle username selection
   const handleLogin = (user) => {
@@ -284,6 +338,20 @@ export default function App() {
 
   // Handle repository selection
   const handleSelectRepo = (repoName) => {
+    const repoDetails = repos.find(r => r.name === repoName);
+    if (repoDetails) {
+      projectCache.setProjectMeta(repoName, repoDetails);
+    }
+    
+    // Clear branches state to avoid showing stale data from the previous project.
+    // If cached data is available, populate immediately to avoid flashing skeletons.
+    const cachedBranches = projectCache.getTabData(repoName, 'branches');
+    if (cachedBranches) {
+      setBranches(cachedBranches);
+    } else {
+      setBranches([]);
+    }
+
     setSelectedRepo(repoName);
     setActiveView('repo');
 
@@ -731,7 +799,7 @@ export default function App() {
 
   // Logout utility
   const handleLogout = () => {
-    localStorage.removeItem('teamsync_current_user');
+    clearStorage();
     setCurrentUser(null);
     setActiveView('login');
 
@@ -774,6 +842,7 @@ export default function App() {
           <Projects 
             repos={repos} 
             reposError={reposError} 
+            reposErrorResetAt={reposErrorResetAt}
             onSelectRepo={handleSelectRepo} 
             onRegisterSuccess={fetchRepos} 
             onRetry={fetchRepos}
@@ -782,6 +851,7 @@ export default function App() {
       case 'repo':
         return (
           <RepoView 
+            key={selectedRepo}
             repoName={selectedRepo} 
             githubRepo={repos.find(r => r.name === selectedRepo)?.github_repo}
             onBack={() => setActiveView('projects')} 
@@ -790,6 +860,7 @@ export default function App() {
             users={users}
             activePresence={activePresence}
             currentUser={currentUser}
+            fetchBranches={fetchBranches}
             onWorkOnBranch={handleWorkOnBranch}
             onAddTicket={handleAddTicket}
             onUpdateTicketStatus={handleUpdateTicketStatus}
@@ -949,6 +1020,35 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Toast Notification Container */}
+      <div className="toast-container">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`toast toast-${toast.type}`}>
+            <div className="toast-content-wrapper">
+              <div className="toast-icon">
+                {toast.type === 'info' && <Info size={16} style={{ color: 'var(--teal)' }} />}
+                {toast.type === 'warning' && <AlertTriangle size={16} style={{ color: 'var(--amber)' }} />}
+                {toast.type === 'error' && <AlertTriangle size={16} style={{ color: 'var(--red)' }} />}
+              </div>
+              <div className="toast-body">
+                <div className="toast-title">
+                  {toast.type === 'info' && 'TeamSync Companion'}
+                  {toast.type === 'warning' && 'TeamSync Warning'}
+                  {toast.type === 'error' && 'TeamSync Error'}
+                </div>
+                <div className="toast-message">{toast.message}</div>
+              </div>
+              <button className="toast-close" onClick={() => removeToast(toast.id)}>
+                <X size={14} />
+              </button>
+            </div>
+            <div className="toast-progress">
+              <div className="toast-progress-bar"></div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

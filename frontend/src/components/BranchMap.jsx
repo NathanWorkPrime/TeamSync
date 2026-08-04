@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import GitActionCenter from './GitActionCenter';
 import { 
   AlertTriangle, 
   GitPullRequest, 
@@ -16,7 +17,10 @@ import {
   Terminal,
   Server,
   AlertCircle,
-  Lock
+  Lock,
+  Monitor,
+  Trash2,
+  FolderOpen
 } from 'lucide-react';
 
 export default function BranchMap({ 
@@ -25,15 +29,37 @@ export default function BranchMap({
   activePresence, 
   currentUser, 
   repoName, 
-  githubRepo 
+  githubRepo,
+  loading,
+  activeOperations = {},
+  onViewLocally,
+  onDeleteBranch,
+  fetchBranches,
+  onMergeSuccess,
+  companionOnline,
+  localGitStatus
 }) {
+  const getHeaders = (extraHeaders = {}) => {
+    const cached = localStorage.getItem('teamsync_current_user');
+    let token = '';
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.session_token) token = parsed.session_token;
+      } catch (e) {}
+    }
+    const headers = { ...extraHeaders };
+    if (token) {
+      headers['X-User-Session'] = token;
+    }
+    return headers;
+  };
+
   const [selectedBranch, setSelectedBranch] = useState(branches[0]?.name || null);
   const [isMergeSidebarOpen, setIsMergeSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('history'); // 'history', 'changelog'
 
   const [cloneStates, setCloneStates] = useState({}); // { [branchName]: { status, errorMsg } }
-  const [pullStates, setPullStates] = useState({}); // { [branchName]: { status, errorMsg } }
-  const [pushStates, setPushStates] = useState({}); // { [branchName]: { status, errorMsg } }
   const [mergeStates, setMergeStates] = useState({}); // { [branchName]: { status, conflictedFiles, errorMsg, target } }
   
   const [historyEvents, setHistoryEvents] = useState([]);
@@ -72,7 +98,9 @@ export default function BranchMap({
     setProtectionLoading(true);
     setProtectionError(null);
     try {
-      const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(branchName)}/protection`);
+      const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(branchName)}/protection`, {
+        headers: getHeaders()
+      });
       if (!res.ok) {
         throw new Error('Failed to fetch branch protection settings');
       }
@@ -88,13 +116,13 @@ export default function BranchMap({
 
   const handleSaveProtection = async (e) => {
     e.preventDefault();
-    if (!selectedBranch || !repoName || !protectionSettings) return;
+    if (!selectedBranch || !repoName) return;
     setProtectionSaving(true);
     setProtectionError(null);
     try {
       const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/branches/${encodeURIComponent(selectedBranch)}/protection`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(protectionSettings)
       });
       if (!res.ok) {
@@ -137,7 +165,9 @@ export default function BranchMap({
     if (!branchName) return;
     setHistoryLoading(true);
     try {
-      const res = await fetch(`/api/repos/${repoName}/branches/${branchName}/history`);
+      const res = await fetch(`/api/repos/${repoName}/branches/${branchName}/history`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setHistoryEvents(data);
@@ -154,7 +184,9 @@ export default function BranchMap({
     if (!branchName) return;
     setChangelogLoading(true);
     try {
-      const res = await fetch(`/api/rooms/${repoName}/${branchName}/deployments`);
+      const res = await fetch(`/api/rooms/${repoName}/${branchName}/deployments`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         const deploymentsWithChangelog = (data || []).filter(d => d.status === 'success' && d.changelog);
@@ -192,7 +224,9 @@ export default function BranchMap({
       setCompareLoading(true);
       setCompareError(null);
       try {
-        const res = await fetch(`/api/repos/${repoName}/compare?base=${mergeTarget}&head=${sourceBranch}`);
+        const res = await fetch(`/api/repos/${repoName}/compare?base=${mergeTarget}&head=${sourceBranch}`, {
+          headers: getHeaders()
+        });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.error || `Comparison failed with status ${res.status}`);
@@ -282,7 +316,7 @@ export default function BranchMap({
         }, 5000);
 
         // Reload local page context
-        window.location.reload();
+        if (onMergeSuccess) onMergeSuccess(sourceBranch);
       }
     } catch (err) {
       console.error('[BranchMap] Merge failed:', err);
@@ -323,7 +357,7 @@ export default function BranchMap({
       try {
         await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             event_type: 'repo:synced',
             event_category: 'project',
@@ -345,7 +379,7 @@ export default function BranchMap({
       }, 5000);
 
       // Refresh view
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
 
     } catch (err) {
       console.error('[BranchMap] Get Local failed:', err);
@@ -356,131 +390,14 @@ export default function BranchMap({
     }
   };
 
-  const handlePull = async (branchName) => {
-    setPullStates(prev => ({
-      ...prev,
-      [branchName]: { status: 'loading' }
-    }));
-
-    try {
-      const res = await fetch('http://localhost:37845/pull-repo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo: githubRepo || repoName,
-          branch: branchName
-        })
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to pull repository updates.');
-      }
-
-      setPullStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'success' }
-      }));
-
-      // Publish event to the central event bus
-      try {
-        await fetch('/api/events', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            event_type: 'repo:pulled',
-            event_category: 'project',
-            repo_name: repoName,
-            branch_name: branchName,
-            user_id: currentUser?.id || 1,
-            metadata: { action: 'pull', branch: branchName }
-          })
-        });
-      } catch (e) {}
-
-      setTimeout(() => {
-        setPullStates(prev => ({
-          ...prev,
-          [branchName]: { status: 'idle' }
-        }));
-      }, 5000);
-
-      window.location.reload();
-
-    } catch (err) {
-      console.error('[BranchMap] Pull failed:', err);
-      setPullStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'error', errorMsg: err.message }
-      }));
-    }
-  };
-
-  const handlePush = async (branchName) => {
-    setPushStates(prev => ({
-      ...prev,
-      [branchName]: { status: 'loading' }
-    }));
-
-    try {
-      const res = await fetch('http://localhost:37845/push-repo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo: githubRepo || repoName,
-          branch: branchName
-        })
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to push repository commits.');
-      }
-
-      setPushStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'success' }
-      }));
-
-      // Publish event to the central event bus
-      try {
-        await fetch('/api/events', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            event_type: 'repo:pushed',
-            event_category: 'project',
-            repo_name: repoName,
-            branch_name: branchName,
-            user_id: currentUser?.id || 1,
-            metadata: { action: 'push', branch: branchName }
-          })
-        });
-      } catch (e) {}
-
-      setTimeout(() => {
-        setPushStates(prev => ({
-          ...prev,
-          [branchName]: { status: 'idle' }
-        }));
-      }, 5000);
-
-      window.location.reload();
-
-    } catch (err) {
-      console.error('[BranchMap] Push failed:', err);
-      setPushStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'error', errorMsg: err.message }
-      }));
-    }
-  };
 
   const fetchPrDetails = async () => {
     if (!selectedBranchData?.pr?.number) return;
     setPrLoading(true);
     try {
-      const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}`);
+      const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}`, {
+        headers: getHeaders()
+      });
       if (res.ok) {
         const data = await res.json();
         setPrDetails(data);
@@ -507,7 +424,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           sourceBranch,
           targetBranch: mergeTarget,
@@ -521,7 +438,7 @@ export default function BranchMap({
       }
       
       // Force reload to sync branches and retrieve new PR
-      window.location.reload();
+      if (fetchBranches) fetchBranches();
     } catch (err) {
       console.error('[BranchMap] Create PR failed:', err);
       alert(err.message);
@@ -535,7 +452,8 @@ export default function BranchMap({
     setPrApproving(true);
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}/approve`, {
-        method: 'POST'
+        method: 'POST',
+        headers: getHeaders()
       });
       const data = await res.json();
       if (!res.ok) {
@@ -559,7 +477,8 @@ export default function BranchMap({
     }));
     try {
       const res = await fetch(`/api/repos/${repoName}/pulls/${selectedBranchData.pr.number}/merge`, {
-        method: 'POST'
+        method: 'POST',
+        headers: getHeaders()
       });
       const data = await res.json();
       if (!res.ok) {
@@ -570,7 +489,7 @@ export default function BranchMap({
         [sourceBranch]: { status: 'success', target: mergeTarget }
       }));
       setTimeout(() => {
-        window.location.reload();
+        if (onMergeSuccess) onMergeSuccess(sourceBranch);
       }, 2000);
     } catch (err) {
       console.error('[BranchMap] Merge PR failed:', err);
@@ -588,7 +507,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/branches/${selectedBranch}/changelog`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           content: newChangelogContent,
           author_user_id: currentUser?.id || 1
@@ -613,7 +532,7 @@ export default function BranchMap({
     try {
       const res = await fetch(`/api/repos/${repoName}/branches`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           branch_name: newBranchName.trim(),
           base_branch: baseBranchName
@@ -622,7 +541,7 @@ export default function BranchMap({
       if (res.ok) {
         setNewBranchName('');
         setShowCreateBranchModal(false);
-        window.location.reload();
+        if (fetchBranches) fetchBranches();
       } else {
         const errData = await res.json();
         setCreateBranchError(errData.error || 'Failed to create branch.');
@@ -861,6 +780,32 @@ export default function BranchMap({
                   ↓ {node.localBehind}
                 </span>
               )}
+              
+              {!isCurrent && !node.isMain && !node.isProtected && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onDeleteBranch) onDeleteBranch(node.name);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'color 0.15s ease',
+                    marginLeft: '4px'
+                  }}
+                  onMouseOver={(e) => e.currentTarget.style.color = 'var(--red)'}
+                  onMouseOut={(e) => e.currentTarget.style.color = 'var(--text-dim)'}
+                  title={`Delete branch ${node.name}`}
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
             </div>
           </div>
 
@@ -871,37 +816,72 @@ export default function BranchMap({
             </div>
           )}
 
-          {/* Collaborator Avatars */}
-          {collaborators.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '2px' }}>
-              <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>Active:</span>
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                {collaborators.map((c, idx) => (
-                  <div
-                    key={c.id}
-                    title={`${c.name} is working on this`}
-                    style={{
-                      width: '18px',
-                      height: '18px',
-                      borderRadius: '50%',
-                      backgroundColor: c.avatar_color || 'var(--teal)',
-                      color: 'rgba(15,23,42,0.85)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '8.5px',
-                      fontWeight: 800,
-                      border: '1.5px solid var(--surface)',
-                      marginLeft: idx > 0 ? '-6px' : '0',
-                      zIndex: 10 - idx
-                    }}
-                  >
-                    {c.name ? c.name[0].toUpperCase() : 'U'}
-                  </div>
-                ))}
+          {/* Bottom Actions Row: Collaborators & View Locally */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', gap: '8px' }}>
+            {collaborators.length > 0 ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>Active:</span>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  {collaborators.map((c, idx) => (
+                    <div
+                      key={c.id}
+                      title={`${c.name} is working on this`}
+                      style={{
+                        width: '18px',
+                        height: '18px',
+                        borderRadius: '50%',
+                        backgroundColor: c.avatar_color || 'var(--teal)',
+                        color: 'rgba(15,23,42,0.85)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: '8.5px',
+                        fontWeight: 800,
+                        border: '1.5px solid var(--surface)',
+                        marginLeft: idx > 0 ? '-6px' : '0',
+                        zIndex: 10 - idx
+                      }}
+                    >
+                      {c.name ? c.name[0].toUpperCase() : 'U'}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            ) : <div />}
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onViewLocally) onViewLocally(node.name);
+              }}
+              className="btn-secondary"
+              style={{
+                padding: '4px 8px',
+                fontSize: '11px',
+                borderRadius: '6px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                border: '1px solid var(--border)',
+                background: 'rgba(255,255,255,0.02)',
+                color: activeOperations[node.name] ? 'var(--teal)' : 'var(--text-dim)',
+                cursor: activeOperations[node.name] ? 'not-allowed' : 'pointer'
+              }}
+              disabled={!!activeOperations[node.name]}
+            >
+              {activeOperations[node.name] ? (
+                <>
+                  <RefreshCw size={11} className="spin" />
+                  <span>{activeOperations[node.name]}</span>
+                </>
+              ) : (
+                <>
+                  <Monitor size={11} />
+                  <span>View Locally</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Child branches */}
@@ -913,6 +893,10 @@ export default function BranchMap({
       </div>
     );
   };
+
+  if (loading && branches.length === 0) {
+    return <BranchMapSkeleton />;
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '24px', flexGrow: 1, height: '100%', minHeight: '520px', position: 'relative' }}>
@@ -964,14 +948,289 @@ export default function BranchMap({
         )}
       </div>
 
+      {/* 1.5. Merge Center (In main flow, below Header card) */}
+      {isMergeSidebarOpen && (
+        <div className="panel" style={{ margin: 0, padding: '20px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Header */}
+          <div style={{ paddingBottom: '12px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <GitMerge size={16} style={{ color: 'var(--teal)' }} />
+              <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', margin: 0 }}>
+                Merge Center
+              </h3>
+            </div>
+            <button 
+              onClick={() => setIsMergeSidebarOpen(false)}
+              style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '18px', cursor: 'pointer' }}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* 2-Column Responsive Layout */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+            
+            {/* Left Column: Configuration, Merge Flow, and Commits */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* Target Branch selection */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                  Target Parent Branch
+                </label>
+                <select
+                  className="form-control"
+                  value={mergeTarget}
+                  onChange={(e) => setMergeTarget(e.target.value)}
+                  style={{ fontSize: '13px', padding: '8px 12px' }}
+                >
+                  <option value="">-- Select Target Branch --</option>
+                  {branches.map(b => (
+                    <option key={b.name} value={b.name}>{b.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Merge Flow Visualizer */}
+              {sourceBranch && mergeTarget && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', background: 'var(--surface-2)', borderRadius: '8px', border: '1px solid var(--border)', justifyContent: 'center' }}>
+                  <span className="mono" style={{ fontSize: '12px', color: 'var(--teal)', fontWeight: 600 }}>{sourceBranch}</span>
+                  <ArrowRight size={14} style={{ color: 'var(--text-dim)' }} />
+                  <span className="mono" style={{ fontSize: '12px', color: 'var(--green)', fontWeight: 600 }}>{mergeTarget}</span>
+                </div>
+              )}
+
+              {/* Commits list to be merged */}
+              {sourceBranch && mergeTarget && !compareLoading && compareData && (
+                <div>
+                  <h5 style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '8px' }}>
+                    Commits to merge ({compareData.commits.length})
+                  </h5>
+                  {compareData.commits.length === 0 ? (
+                    <div style={{ color: 'var(--text-dim)', fontStyle: 'italic', fontSize: '12px' }}>No new commits to merge.</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '160px', overflowY: 'auto' }}>
+                      {compareData.commits.map(c => (
+                        <div key={c.hash} style={{ padding: '6px 10px', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '11.5px' }}>
+                          <div style={{ fontWeight: 600, color: 'var(--text)' }} className="mono">{c.hash.substring(0, 7)}</div>
+                          <div style={{ color: 'var(--text-dim)', marginTop: '2px' }}>{c.message}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Right Column: Warnings, Status checks, PRs, and Actions */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              
+              {/* Branch Protection Warning notice */}
+              {sourceBranch && mergeTarget && branches.find(b => b.name === mergeTarget)?.isProtected && (
+                <div style={{ 
+                  fontSize: '12.5px', 
+                  color: 'var(--amber)', 
+                  background: 'rgba(245,158,11,0.04)', 
+                  padding: '12px 14px', 
+                  borderRadius: '8px', 
+                  border: '1px solid rgba(245,158,11,0.2)', 
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  gap: '6px' 
+                }}>
+                  <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <AlertTriangle size={15} />
+                    <span>⚠️ Protected Target Branch</span>
+                  </div>
+                  <span>The target branch <code className="mono">{mergeTarget}</code> is protected. Pushing directly is blocked by default on GitHub. Creating a Pull Request is the recommended path.</span>
+                </div>
+              )}
+
+              {/* Merge Status alerts */}
+              {sourceBranch && mergeTarget && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  
+                  {/* Compare status loading */}
+                  {compareLoading && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-dim)', fontSize: '12.5px' }}>
+                      <RefreshCw size={14} className="spin" />
+                      <span>Checking for merge conflicts...</span>
+                    </div>
+                  )}
+
+                  {/* Compare status success */}
+                  {!compareLoading && compareData && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      {compareData.hasConflicts ? (
+                        <div style={{ color: 'var(--red)', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '8px', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700 }}>⚠️ Merge Conflict Warning</span>
+                          <span style={{ fontSize: '12px' }}>Automatic merging is blocked by conflicts in:</span>
+                          <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '11.5px' }}>
+                            {compareData.files.filter(f => f.status === 'conflict').map(f => (
+                              <li key={f.filename} className="mono">{f.filename}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : (
+                        <div style={{ color: 'var(--green)', background: 'rgba(16,185,129,0.06)', border: '1px solid var(--green)', borderRadius: '8px', padding: '12px 16px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <CheckCircle size={15} />
+                          <span>Branches can be merged cleanly.</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* PR Management Section */}
+              {sourceBranch && mergeTarget && (
+                <div style={{ padding: '14px', background: 'var(--surface-2)', borderRadius: '8px', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                    <GitPullRequest size={14} style={{ color: 'var(--teal)' }} />
+                    <span>GitHub Pull Request status</span>
+                  </div>
+                  
+                  {prLoading ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-dim)', fontSize: '12.5px' }}>
+                      <RefreshCw size={14} className="spin" />
+                      <span>Loading Pull Request info...</span>
+                    </div>
+                  ) : prDetails ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <div style={{ fontSize: '13px', color: 'var(--text)' }}>
+                        <strong>PR #{prDetails.pr.number}:</strong>{' '}
+                        <a href={prDetails.pr.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--teal)', textDecoration: 'underline' }}>
+                          {prDetails.pr.title}
+                        </a>
+                      </div>
+                      
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
+                        <span style={{ 
+                          padding: '2px 6px', 
+                          borderRadius: '4px', 
+                          background: prDetails.pr.status === 'open' ? 'rgba(16,185,129,0.1)' : 'rgba(156,163,175,0.1)',
+                          color: prDetails.pr.status === 'open' ? 'var(--green)' : 'var(--text-dim)',
+                          fontWeight: 600
+                        }}>
+                          {prDetails.pr.status.toUpperCase()}
+                        </span>
+                        <span style={{ color: 'var(--text-dim)' }}>
+                          • {prDetails.isApproved ? `Approved (${prDetails.approvalsCount} reviews)` : 'Review required'}
+                        </span>
+                      </div>
+
+                      {prDetails.isSimulatedApproved && (
+                        <div style={{ fontSize: '11px', color: 'var(--amber)', background: 'rgba(245,158,11,0.06)', padding: '6px 8px', borderRadius: '4px', border: '1px solid rgba(245,158,11,0.2)' }}>
+                          ℹ️ Simulated approval active for single-user testing/demo.
+                        </div>
+                      )}
+
+                      {prDetails.pr.status === 'open' && !prDetails.isApproved && (
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          style={{ padding: '6px 12px', fontSize: '12px', background: 'var(--amber-glow)', color: 'var(--amber)', border: '1px solid var(--amber)' }}
+                          onClick={handleApprovePr}
+                          disabled={prApproving}
+                        >
+                          {prApproving ? 'Approving...' : 'Approve Pull Request (Submit Review)'}
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
+                        No active Pull Request exists from <code className="mono">{sourceBranch}</code> to <code className="mono">{mergeTarget}</code>.
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        style={{ padding: '8px 12px', fontSize: '12.5px', background: 'var(--teal-glow)', color: 'var(--teal)', border: '1px solid var(--teal)' }}
+                        onClick={handleCreatePr}
+                        disabled={prCreating}
+                      >
+                        {prCreating ? 'Creating PR...' : 'Create GitHub Pull Request'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Trigger Merge Button */}
+              {sourceBranch && mergeTarget && (() => {
+                const hasPr = !!selectedBranchData?.pr;
+                const isApproved = prDetails?.isApproved;
+                const isLoading = mergeStates[sourceBranch]?.status === 'loading';
+                const isTargetProtected = branches.find(b => b.name === mergeTarget)?.isProtected;
+                
+                if (hasPr) {
+                  return (
+                    <button 
+                      className="btn-primary" 
+                      style={{ width: '100%', padding: '12px', fontSize: '13px', marginTop: 'auto', background: isApproved ? 'var(--teal)' : 'var(--surface-3)', border: isApproved ? 'none' : '1px solid var(--border)' }}
+                      onClick={handleMergePr}
+                      disabled={!mergeTarget || isLoading || !isApproved || (compareData && compareData.hasConflicts)}
+                    >
+                      {isLoading ? 'Merging Pull Request...' : 'Merge Pull Request (GitHub)'}
+                    </button>
+                  );
+                }
+                
+                return (
+                  <button 
+                    className="btn-primary" 
+                    style={{ 
+                      width: '100%', 
+                      padding: '12px', 
+                      fontSize: '13px', 
+                      marginTop: 'auto',
+                      background: isTargetProtected ? 'var(--surface-3)' : 'var(--teal)',
+                      border: isTargetProtected ? '1px solid var(--border)' : 'none',
+                      color: isTargetProtected ? 'var(--text-dim)' : '#ffffff'
+                    }}
+                    onClick={() => handleMerge(sourceBranch, mergeTarget)}
+                    disabled={!mergeTarget || isLoading || (compareData && compareData.hasConflicts)}
+                  >
+                    {isLoading ? 'Merging & Pushing...' : 'Merge & Push Commit (Direct)'}
+                  </button>
+                );
+              })()}
+
+              {/* Merge states logs */}
+              {sourceBranch && (() => {
+                const ms = mergeStates[sourceBranch];
+                if (!ms) return null;
+                if (ms.status === 'conflict') {
+                  return (
+                    <div style={{ color: 'var(--red)', fontSize: '12px', padding: '10px 14px', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '6px' }}>
+                      <strong>Conflict:</strong> Merge failed. Open Antigravity to resolve conflicts in files:
+                      <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px' }}>
+                        {ms.conflictedFiles.map(f => (
+                          <li key={f} className="mono" style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => handleOpenFile(f)}>{f}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                }
+                if (ms.status === 'error') {
+                  return (
+                    <div style={{ color: 'var(--red)', fontSize: '12px', padding: '10px 14px', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '6px' }}>
+                      <strong>Error:</strong> {ms.errorMsg}
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 2. Branches Page content (Branches List + Details Panel) */}
       <div style={{ 
         display: 'grid', 
         gridTemplateColumns: '360px 1fr', 
         gap: '24px', 
-        flexGrow: 1,
-        transition: 'margin-right 0.3s ease',
-        marginRight: isMergeSidebarOpen ? '380px' : '0px'
+        flexGrow: 1
       }}>
         {/* Left Panel: Hierarchical Branches list */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%', minHeight: 0 }}>
@@ -1061,65 +1320,42 @@ export default function BranchMap({
                       {isCurrentUserOnBranch(selectedBranchData.name) ? 'In session' : 'Work on this'}
                     </button>
                   )}
-                  
-                  {(() => {
+
+                  {companionOnline && (
+                    <GitActionCenter
+                      repoName={repoName}
+                      githubRepo={githubRepo}
+                      status={localGitStatus}
+                      companionOnline={companionOnline}
+                      onRefreshStatus={fetchBranches}
+                      variant="button"
+                      branchName={selectedBranchData.name}
+                    />
+                  )}
+                
+                {(() => {
                     const state = cloneStates[selectedBranchData.name] || { status: 'idle' };
-                    const pullState = pullStates[selectedBranchData.name] || { status: 'idle' };
-                    const pushState = pushStates[selectedBranchData.name] || { status: 'idle' };
-                    let btnText = 'Sync with GitHub';
                     let btnStyle = { padding: '8px 16px', fontSize: '12.5px' };
-                    
-                    if (selectedBranchData.localAhead > 0 || selectedBranchData.localBehind > 0) {
-                      const aheadText = selectedBranchData.localAhead > 0 ? `${selectedBranchData.localAhead} ahead` : '';
-                      const behindText = selectedBranchData.localBehind > 0 ? `${selectedBranchData.localBehind} behind` : '';
-                      const counts = [aheadText, behindText].filter(Boolean).join(', ');
-                      btnText = `Sync Workspace (${counts})`;
-                    }
                     
                     return (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'stretch' }}>
-                        {/* Primary Sync Workspace Button */}
+                        {/* Primary Open in VS Code Button */}
                         <div style={{ display: 'flex', gap: '6px' }}>
                           <button 
                             className={`local-btn ${state.status === 'loading' ? 'loading' : state.status === 'success' ? 'success' : state.status === 'error' ? 'error' : ''}`}
                             style={{ ...btnStyle, flexGrow: 1 }}
                             onClick={() => handleGetLocal(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Sync Workspace (Combined): Pull remote changes then Push local commits."
+                            disabled={state.status === 'loading'}
+                            title="Clones the repository if needed, switches to the branch, and opens it locally in VS Code."
                           >
-                            {state.status === 'loading' && <RefreshCw size={12} className="spin" style={{ marginRight: '6px' }} />}
-                            {state.status === 'success' && <span style={{ marginRight: '4px' }}>✓</span>}
-                            {state.status === 'error' && <span style={{ marginRight: '4px' }}>⚠</span>}
-                            {btnText}
-                          </button>
-                        </div>
-                        
-                        {/* Sub-actions Pull/Push for finer control */}
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <button
-                            className={`local-btn ${pullState.status === 'loading' ? 'loading' : pullState.status === 'success' ? 'success' : pullState.status === 'error' ? 'error' : ''}`}
-                            style={{ padding: '6px 12px', fontSize: '11.5px', background: 'var(--surface-3)', color: 'var(--text)', border: '1px solid var(--border)', flexGrow: 1 }}
-                            onClick={() => handlePull(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Pull: Fetch and pull remote changes into local files only."
-                          >
-                            {pullState.status === 'loading' && <RefreshCw size={11} className="spin" style={{ marginRight: '4px' }} />}
-                            {pullState.status === 'success' && <span style={{ marginRight: '4px', color: 'var(--green)' }}>✓</span>}
-                            {pullState.status === 'error' && <span style={{ marginRight: '4px', color: 'var(--red)' }}>⚠</span>}
-                            Pull Remote
-                          </button>
-                          
-                          <button
-                            className={`local-btn ${pushState.status === 'loading' ? 'loading' : pushState.status === 'success' ? 'success' : pushState.status === 'error' ? 'error' : ''}`}
-                            style={{ padding: '6px 12px', fontSize: '11.5px', background: 'var(--surface-3)', color: 'var(--text)', border: '1px solid var(--border)', flexGrow: 1 }}
-                            onClick={() => handlePush(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Push: Push local commits to remote without pulling first."
-                          >
-                            {pushState.status === 'loading' && <RefreshCw size={11} className="spin" style={{ marginRight: '4px' }} />}
-                            {pushState.status === 'success' && <span style={{ marginRight: '4px', color: 'var(--green)' }}>✓</span>}
-                            {pushState.status === 'error' && <span style={{ marginRight: '4px', color: 'var(--red)' }}>⚠</span>}
-                            Push Commits
+                            {state.status === 'loading' ? (
+                              <RefreshCw size={12} className="spin" style={{ marginRight: '6px' }} />
+                            ) : (
+                              <FolderOpen size={12} style={{ marginRight: '6px' }} />
+                            )}
+                            {state.status === 'success' && <span style={{ marginRight: '4px' }}>✓ </span>}
+                            {state.status === 'error' && <span style={{ marginRight: '4px' }}>⚠ </span>}
+                            Open in VS Code
                           </button>
                         </div>
 
@@ -1127,16 +1363,6 @@ export default function BranchMap({
                         {state.status === 'error' && state.errorMsg && (
                           <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
                             {state.errorMsg}
-                          </div>
-                        )}
-                        {pullState.status === 'error' && pullState.errorMsg && (
-                          <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
-                            Pull failed: {pullState.errorMsg}
-                          </div>
-                        )}
-                        {pushState.status === 'error' && pushState.errorMsg && (
-                          <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
-                            Push failed: {pushState.errorMsg}
                           </div>
                         )}
                       </div>
@@ -1370,7 +1596,8 @@ export default function BranchMap({
                 {[
                   { id: 'history', label: 'History Logs', icon: <History size={14} /> },
                   { id: 'changelog', label: 'Changelog Entries', icon: <FileText size={14} /> },
-                  { id: 'protection', label: 'Branch Protection', icon: <Lock size={14} /> }
+                  { id: 'protection', label: 'Branch Protection', icon: <Lock size={14} /> },
+                  { id: 'console', label: 'Git Console', icon: <Terminal size={14} /> }
                 ].map(t => {
                   const isActive = activeTab === t.id;
                   return (
@@ -1683,6 +1910,21 @@ export default function BranchMap({
                   </div>
                 )}
 
+                {/* GIT ACTION CENTER TAB CONTENT */}
+                {activeTab === 'console' && (
+                  <div style={{ padding: '8px 0' }}>
+                    <GitActionCenter
+                      repoName={repoName}
+                      githubRepo={githubRepo}
+                      status={localGitStatus}
+                      companionOnline={companionOnline}
+                      onRefreshStatus={fetchBranches}
+                      variant="tab"
+                      branchName={selectedBranchData.name}
+                    />
+                  </div>
+                )}
+
               </div>
 
             </div>
@@ -1696,257 +1938,7 @@ export default function BranchMap({
 
       </div>
 
-      {/* 3. Right-hand Sidebar Drawer (Merge Center & Compare Panel) */}
-      <div 
-        style={{
-          position: 'fixed',
-          top: '64px',
-          right: 0,
-          bottom: 0,
-          width: '380px',
-          background: 'var(--surface)',
-          borderLeft: '1px solid var(--border)',
-          boxShadow: 'var(--sidebar-shadow)',
-          zIndex: 100,
-          transform: isMergeSidebarOpen ? 'translateX(0)' : 'translateX(100%)',
-          transition: 'transform 0.3s ease',
-          display: 'flex',
-          flexDirection: 'column',
-          minHeight: 0
-        }}
-      >
-        {/* Sidebar Header */}
-        <div style={{ padding: '20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <GitMerge size={16} style={{ color: 'var(--teal)' }} />
-            <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text)', margin: 0 }}>
-              Merge Center
-            </h3>
-          </div>
-          <button 
-            onClick={() => setIsMergeSidebarOpen(false)}
-            style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '18px', cursor: 'pointer' }}
-          >
-            ×
-          </button>
-        </div>
 
-        {/* Sidebar Content */}
-        <div style={{ flexGrow: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          
-          {/* Target Branch selection */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <label style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-              Target Parent Branch
-            </label>
-            <select
-              className="form-control"
-              value={mergeTarget}
-              onChange={(e) => setMergeTarget(e.target.value)}
-              style={{ fontSize: '13px', padding: '8px 12px' }}
-            >
-              <option value="">-- Select Target Branch --</option>
-              {branches.map(b => (
-                <option key={b.name} value={b.name}>{b.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Merge Flow Visualizer */}
-          {sourceBranch && mergeTarget && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', background: 'var(--surface-2)', borderRadius: '8px', border: '1px solid var(--border)', justifyContent: 'center' }}>
-              <span className="mono" style={{ fontSize: '12px', color: 'var(--teal)', fontWeight: 600 }}>{sourceBranch}</span>
-              <ArrowRight size={14} style={{ color: 'var(--text-dim)' }} />
-              <span className="mono" style={{ fontSize: '12px', color: 'var(--green)', fontWeight: 600 }}>{mergeTarget}</span>
-            </div>
-          )}
-
-          {/* Merge Status alerts */}
-          {sourceBranch && mergeTarget && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              
-              {/* Compare status loading */}
-              {compareLoading && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-dim)', fontSize: '12.5px' }}>
-                  <RefreshCw size={14} className="spin" />
-                  <span>Checking for merge conflicts...</span>
-                </div>
-              )}
-
-              {/* Compare status success */}
-              {!compareLoading && compareData && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {compareData.hasConflicts ? (
-                    <div style={{ color: 'var(--red)', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '8px', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 700 }}>⚠️ Merge Conflict Warning</span>
-                      <span style={{ fontSize: '12px' }}>Automatic merging is blocked by conflicts in:</span>
-                      <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '11.5px' }}>
-                        {compareData.files.filter(f => f.status === 'conflict').map(f => (
-                          <li key={f.filename} className="mono">{f.filename}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : (
-                    <div style={{ color: 'var(--green)', background: 'rgba(16,185,129,0.06)', border: '1px solid var(--green)', borderRadius: '8px', padding: '12px 16px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <CheckCircle size={15} />
-                      <span>Branches can be merged cleanly.</span>
-                    </div>
-                  )}
-
-                  {/* Commits list to be merged */}
-                  <div>
-                    <h5 style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '8px' }}>
-                      Commits to merge ({compareData.commits.length})
-                    </h5>
-                    {compareData.commits.length === 0 ? (
-                      <div style={{ color: 'var(--text-dim)', fontStyle: 'italic', fontSize: '12px' }}>No new commits to merge.</div>
-                    ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '160px', overflowY: 'auto' }}>
-                        {compareData.commits.map(c => (
-                          <div key={c.hash} style={{ padding: '6px 10px', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '11.5px' }}>
-                            <div style={{ fontWeight: 600, color: 'var(--text)' }} className="mono">{c.hash.substring(0, 7)}</div>
-                            <div style={{ color: 'var(--text-dim)', marginTop: '2px' }}>{c.message}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* PR Management Section */}
-          {sourceBranch && mergeTarget && (
-            <div style={{ padding: '14px', background: 'var(--surface-2)', borderRadius: '8px', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                <GitPullRequest size={14} style={{ color: 'var(--teal)' }} />
-                <span>GitHub Pull Request status</span>
-              </div>
-              
-              {prLoading ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-dim)', fontSize: '12.5px' }}>
-                  <RefreshCw size={14} className="spin" />
-                  <span>Loading Pull Request info...</span>
-                </div>
-              ) : prDetails ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <div style={{ fontSize: '13px', color: 'var(--text)' }}>
-                    <strong>PR #{prDetails.pr.number}:</strong>{' '}
-                    <a href={prDetails.pr.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--teal)', textDecoration: 'underline' }}>
-                      {prDetails.pr.title}
-                    </a>
-                  </div>
-                  
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
-                    <span style={{ 
-                      padding: '2px 6px', 
-                      borderRadius: '4px', 
-                      background: prDetails.pr.status === 'open' ? 'rgba(16,185,129,0.1)' : 'rgba(156,163,175,0.1)',
-                      color: prDetails.pr.status === 'open' ? 'var(--green)' : 'var(--text-dim)',
-                      fontWeight: 600
-                    }}>
-                      {prDetails.pr.status.toUpperCase()}
-                    </span>
-                    <span style={{ color: 'var(--text-dim)' }}>
-                      • {prDetails.isApproved ? `Approved (${prDetails.approvalsCount} reviews)` : 'Review required'}
-                    </span>
-                  </div>
-
-                  {prDetails.isSimulatedApproved && (
-                    <div style={{ fontSize: '11px', color: 'var(--amber)', background: 'rgba(245,158,11,0.06)', padding: '6px 8px', borderRadius: '4px', border: '1px solid rgba(245,158,11,0.2)' }}>
-                      ℹ️ Simulated approval active for single-user testing/demo.
-                    </div>
-                  )}
-
-                  {prDetails.pr.status === 'open' && !prDetails.isApproved && (
-                    <button
-                      className="btn-primary"
-                      style={{ padding: '6px 12px', fontSize: '12px', background: 'var(--amber-glow)', color: 'var(--amber)', border: '1px solid var(--amber)' }}
-                      onClick={handleApprovePr}
-                      disabled={prApproving}
-                    >
-                      {prApproving ? 'Approving...' : 'Approve Pull Request (Submit Review)'}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '12px', color: 'var(--text-dim)' }}>
-                    No active Pull Request exists from <code className="mono">{sourceBranch}</code> to <code className="mono">{mergeTarget}</code>.
-                  </div>
-                  <button
-                    className="btn-primary"
-                    style={{ padding: '8px 12px', fontSize: '12.5px', background: 'var(--teal-glow)', color: 'var(--teal)', border: '1px solid var(--teal)' }}
-                    onClick={handleCreatePr}
-                    disabled={prCreating}
-                  >
-                    {prCreating ? 'Creating PR...' : 'Create GitHub Pull Request'}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Trigger Merge Button */}
-          {(() => {
-            const hasPr = !!selectedBranchData?.pr;
-            const isApproved = prDetails?.isApproved;
-            const isLoading = mergeStates[sourceBranch]?.status === 'loading';
-            
-            if (hasPr) {
-              return (
-                <button 
-                  className="btn-primary" 
-                  style={{ width: '100%', padding: '12px', fontSize: '13px', marginTop: 'auto', background: isApproved ? 'var(--teal)' : 'var(--surface-3)', border: isApproved ? 'none' : '1px solid var(--border)' }}
-                  onClick={handleMergePr}
-                  disabled={!mergeTarget || isLoading || !isApproved || (compareData && compareData.hasConflicts)}
-                >
-                  {isLoading ? 'Merging Pull Request...' : 'Merge Pull Request (GitHub)'}
-                </button>
-              );
-            }
-            
-            return (
-              <button 
-                className="btn-primary" 
-                style={{ width: '100%', padding: '12px', fontSize: '13px', marginTop: 'auto' }}
-                onClick={() => handleMerge(sourceBranch, mergeTarget)}
-                disabled={!mergeTarget || isLoading || (compareData && compareData.hasConflicts)}
-              >
-                {isLoading ? 'Merging & Pushing...' : 'Merge & Push Commit (Direct)'}
-              </button>
-            );
-          })()}
-
-          {/* Merge states logs */}
-          {(() => {
-            const ms = mergeStates[sourceBranch];
-            if (!ms) return null;
-            if (ms.status === 'conflict') {
-              return (
-                <div style={{ color: 'var(--red)', fontSize: '12px', padding: '10px 14px', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '6px' }}>
-                  <strong>Conflict:</strong> Merge failed. Open Antigravity to resolve conflicts in files:
-                  <ul style={{ margin: '4px 0 0 0', paddingLeft: '14px' }}>
-                    {ms.conflictedFiles.map(f => (
-                      <li key={f} className="mono" style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => handleOpenFile(f)}>{f}</li>
-                    ))}
-                  </ul>
-                </div>
-              );
-            }
-            if (ms.status === 'error') {
-              return (
-                <div style={{ color: 'var(--red)', fontSize: '12px', padding: '10px 14px', background: 'rgba(248,113,113,0.06)', border: '1px solid var(--red)', borderRadius: '6px' }}>
-                  <strong>Error:</strong> {ms.errorMsg}
-                </div>
-              );
-            }
-            return null;
-          })()}
-
-        </div>
-      </div>
 
       {/* 4. Create Branch Modal */}
       {showCreateBranchModal && (
@@ -2033,3 +2025,53 @@ export default function BranchMap({
     </div>
   );
 }
+
+const BranchMapSkeleton = () => (
+  <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '24px', flexGrow: 1, height: '100%', minHeight: '520px' }}>
+    {/* Sync Header Panel */}
+    <div className="panel" style={{ margin: 0, padding: '20px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '12px' }}>
+      <div style={{ display: 'flex', justifySelf: 'stretch', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div className="skeleton" style={{ height: '16px', width: '260px', borderRadius: '4px', marginBottom: '8px' }} />
+          <div className="skeleton" style={{ height: '12px', width: '180px', borderRadius: '4px' }} />
+        </div>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <div className="skeleton" style={{ height: '28px', width: '140px', borderRadius: '8px' }} />
+          <div className="skeleton" style={{ height: '28px', width: '110px', borderRadius: '8px' }} />
+        </div>
+      </div>
+    </div>
+
+    {/* Tree & Details Grid */}
+    <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '24px', flexGrow: 1, minHeight: 0 }}>
+      {/* Sidebar Tree Skeleton */}
+      <div className="panel" style={{ margin: 0, padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div className="skeleton" style={{ height: '16px', width: '100px', borderRadius: '4px' }} />
+          <div className="skeleton" style={{ height: '20px', width: '80px', borderRadius: '6px' }} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {[1, 2, 3, 4].map(n => (
+            <div key={n} style={{ display: 'flex', gap: '8px', alignItems: 'center', paddingLeft: `${(n - 1) * 12}px` }}>
+              <div className="skeleton" style={{ height: '12px', width: '12px', borderRadius: '3px' }} />
+              <div className="skeleton" style={{ height: '14px', width: '100px', borderRadius: '4px' }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Details Card Skeleton */}
+      <div className="panel" style={{ margin: 0, padding: '20px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: '16px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div className="skeleton" style={{ height: '20px', width: '180px', borderRadius: '4px' }} />
+            <div className="skeleton" style={{ height: '12px', width: '120px', borderRadius: '4px' }} />
+          </div>
+          <div className="skeleton" style={{ height: '36px', width: '110px', borderRadius: '6px' }} />
+        </div>
+        <div className="skeleton" style={{ height: '80px', width: '100%', borderRadius: '8px' }} />
+        <div className="skeleton" style={{ height: '120px', width: '100%', borderRadius: '8px' }} />
+      </div>
+    </div>
+  </div>
+);
+

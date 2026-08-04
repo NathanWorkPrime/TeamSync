@@ -65,7 +65,12 @@ function dbRun(query, params = []) {
 function executeGitCommand(cmd, repoName) {
   const cwd = getRepoPath(repoName);
   return new Promise((resolve) => {
-    exec(cmd, { cwd }, (error, stdout, stderr) => {
+    const env = { 
+      ...process.env, 
+      GIT_TERMINAL_PROMPT: '0', 
+      GIT_ASKPASS: 'echo' 
+    };
+    exec(cmd, { cwd, env, timeout: 30000 }, (error, stdout, stderr) => {
       if (error) {
         resolve({ success: false, error: stderr || error.message, stdout: stdout || '' });
       } else {
@@ -155,8 +160,8 @@ async function getBranches(repoName) {
     }
   }
 
-  // Union of local and remote branches
-  const allBranchNames = Array.from(new Set([...localBranchNames, ...remoteBranchNames]));
+  // Only return branches that exist on the live GitHub API
+  const allBranchNames = remoteBranchNames;
   
   // If we have no branches at all (empty or uninitialized), return empty array
   if (allBranchNames.length === 0) {
