@@ -92,11 +92,12 @@ app.use((req, res, next) => {
 
 // Periodically sync GitHub issues if configured
 if (githubService.isGitHubConfigured()) {
-  console.log('[Server] GitHub config detected. Initiating issues sync cycle.');
+  const syncIntervalMs = parseInt(process.env.GITHUB_SYNC_INTERVAL_MS, 10) || 15 * 60 * 1000; // default 15 minutes
+  console.log(`[Server] GitHub config detected. Initiating issues sync cycle with interval of ${syncIntervalMs}ms.`);
   githubService.syncGitHubIssues();
   setInterval(() => {
     githubService.syncGitHubIssues();
-  }, 60000);
+  }, syncIntervalMs);
 } else {
   console.log('[Server] No GitHub credentials detected. Running in Demo Mode.');
 }
@@ -330,12 +331,30 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
     if (response.status === 204) {
       collaboratorCache.set(cacheKey, { hasAccess: true, expiresAt: now + CACHE_TTL_MS });
       return true;
-    } else if (response.status === 404 || response.status === 403) {
+    } 
+
+    if (response.status === 403) {
+      const remaining = response.headers.get('x-ratelimit-remaining');
+      const bodyText = await response.text().catch(() => '');
+      
+      const isRateLimit = (remaining === '0') || 
+                          /rate limit exceeded/i.test(bodyText) || 
+                          /API rate limit/i.test(bodyText);
+                          
+      if (isRateLimit) {
+        throw new Error('GitHub API rate limit exceeded');
+      }
+      
       collaboratorCache.set(cacheKey, { hasAccess: false, expiresAt: now + CACHE_TTL_MS });
       return false;
-    } else {
-      throw new Error(`GitHub API returned status ${response.status}`);
     }
+
+    if (response.status === 404) {
+      collaboratorCache.set(cacheKey, { hasAccess: false, expiresAt: now + CACHE_TTL_MS });
+      return false;
+    }
+
+    throw new Error(`GitHub API returned status ${response.status}`);
   } catch (err) {
     console.error(`[CollaboratorCheck] Transient error checking access for ${username} on ${githubRepo}:`, err.message);
     throw err;
