@@ -1371,6 +1371,65 @@ function activate(context) {
             res.status(500).json({ error: err.message });
         }
     });
+    // POST /git-commit - Stage and commit files
+    app.post('/git-commit', async (req, res) => {
+        const { repo, message, files } = req.body;
+        let log = '';
+        if (!repo || !message || !files || !Array.isArray(files) || files.length === 0) {
+            res.status(400).json({ error: 'Repository name, commit message, and non-empty files array are required.' });
+            return;
+        }
+        try {
+            // 1. Resolve repository folder path
+            const stateKey = `repo-path:${repo}`;
+            let baseDir = context.globalState.get(stateKey);
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!baseDir && workspaceFolders && workspaceFolders.length > 0) {
+                baseDir = path.dirname(workspaceFolders[0].uri.fsPath);
+            }
+            if (!baseDir) {
+                baseDir = path.resolve(__dirname, '../../../');
+            }
+            const repoBasename = repo.split('/').pop() || repo;
+            let targetDir = path.join(baseDir, repoBasename);
+            // Map 'TeamSync' to local 'TeamDash' folder if it exists or is the active workspace
+            if (repoBasename === 'TeamSync' && workspaceFolders) {
+                const activeDashFolder = workspaceFolders.find(f => path.basename(f.uri.fsPath) === 'TeamDash' || path.basename(f.uri.fsPath) === 'TeamSync');
+                if (activeDashFolder) {
+                    targetDir = activeDashFolder.uri.fsPath;
+                }
+            }
+            if (!fs.existsSync(targetDir)) {
+                res.status(404).json({ error: `Repository directory not found at ${targetDir}.` });
+                return;
+            }
+            const runLogCmd = async (cmd) => {
+                log += `> ${cmd}\n`;
+                const resOut = await runCmd(cmd, targetDir);
+                if (resOut.stdout)
+                    log += `${resOut.stdout}\n`;
+                if (resOut.stderr)
+                    log += `${resOut.stderr}\n`;
+                return resOut;
+            };
+            // 2. Stage the specified files
+            for (const file of files) {
+                await runLogCmd(`git add "${file}"`);
+            }
+            // 3. Commit the staged changes
+            const safeMessage = message.replace(/"/g, '\\"');
+            await runLogCmd(`git commit -m "${safeMessage}"`);
+            res.json({
+                success: true,
+                log,
+                message: 'Successfully committed files to the local repository.'
+            });
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`TeamSync: Commit failed: ${err.message}`);
+            res.status(500).json({ error: err.message, log });
+        }
+    });
     // GET /diff - Compare local working directory against a target branch or HEAD
     app.get('/diff', async (req, res) => {
         const { repo, branch } = req.query;

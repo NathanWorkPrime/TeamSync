@@ -27,6 +27,17 @@ export default function GitActionCenter({
   const [activeAction, setActiveAction] = useState(null); // null, 'fetching', 'pulling', 'pushing', 'syncing', 'stashing'
   const logEndRef = useRef(null);
 
+  // Staging and committing state
+  const [selectedFiles, setSelectedFiles] = useState({});
+  const [commitMessage, setCommitMessage] = useState('');
+  const [isCommitting, setIsCommitting] = useState(false);
+
+  // Clear inputs when project or branch changes
+  useEffect(() => {
+    setSelectedFiles({});
+    setCommitMessage('');
+  }, [repoName, branchName]);
+
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -65,6 +76,40 @@ export default function GitActionCenter({
     }
   };
 
+  const handleCommit = async () => {
+    const filesToCommit = Object.keys(selectedFiles).filter(f => selectedFiles[f]);
+    if (filesToCommit.length === 0 || !commitMessage.trim() || isCommitting) return;
+
+    setIsCommitting(true);
+    setOperationLog(prev => prev + `[${new Date().toLocaleTimeString()}] Committing ${filesToCommit.length} file(s)...\n`);
+
+    try {
+      const res = await fetch('http://localhost:37845/git-commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: githubRepo || repoName,
+          message: commitMessage,
+          files: filesToCommit
+        })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setOperationLog(prev => prev + (data.log || '') + `\n[SUCCESS] Commit completed successfully.\n----------------------------------------\n`);
+        setCommitMessage('');
+        setSelectedFiles({});
+        onRefreshStatus();
+      } else {
+        setOperationLog(prev => prev + (data.log || '') + `\n[ERROR] Commit failed: ${data.error || 'Unknown error'}\n----------------------------------------\n`);
+      }
+    } catch (err) {
+      setOperationLog(prev => prev + `\n[ERROR] Connection failed: ${err.message}\n----------------------------------------\n`);
+    } finally {
+      setIsCommitting(false);
+    }
+  };
+
   const getCleanStatusString = () => {
     if (!companionOnline) return 'Offline';
     if (!status) return 'Loading...';
@@ -91,9 +136,18 @@ export default function GitActionCenter({
     return diff > 5 * 60 * 1000; // Older than 5 minutes
   };
 
+  const handleToggleFile = (f) => {
+    setSelectedFiles(prev => ({
+      ...prev,
+      [f]: !prev[f]
+    }));
+  };
+
   const renderChangesList = () => {
     if (!status) return null;
-    const hasChanges = status.stagedFilesCount > 0 || status.modifiedFilesCount > 0 || status.untrackedFilesCount > 0;
+    const hasChanges = (status.stagedFiles && status.stagedFiles.length > 0) || 
+                       (status.modifiedFiles && status.modifiedFiles.length > 0) || 
+                       (status.untrackedFiles && status.untrackedFiles.length > 0);
     if (!hasChanges) {
       return (
         <div style={{ padding: '12px', fontSize: '13px', color: 'var(--text-dim)', fontStyle: 'italic', background: 'rgba(255,255,255,0.01)', borderRadius: '8px', border: '1px dashed var(--border)' }}>
@@ -102,26 +156,69 @@ export default function GitActionCenter({
       );
     }
 
+    const renderRow = (f, type, color) => {
+      const isChecked = !!selectedFiles[f];
+      return (
+        <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
+          <input
+            type="checkbox"
+            checked={isChecked}
+            onChange={() => handleToggleFile(f)}
+            style={{ width: '13px', height: '13px', cursor: 'pointer' }}
+          />
+          <span className="mono" style={{ color, flexGrow: 1, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={f}>
+            {f}
+          </span>
+          <strong style={{ fontSize: '9px', textTransform: 'uppercase', color, flexShrink: 0 }}>{type}</strong>
+        </div>
+      );
+    };
+
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '180px', overflowY: 'auto', background: 'rgba(0,0,0,0.15)', padding: '12px', borderRadius: '8px', border: '1px solid var(--border)' }}>
-        {status.stagedFiles.map(f => (
-          <div key={f} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-            <span className="mono" style={{ color: 'var(--green)' }}>{f}</span>
-            <strong style={{ fontSize: '9px', textTransform: 'uppercase', color: 'var(--green)' }}>staged</strong>
-          </div>
-        ))}
-        {status.modifiedFiles.map(f => (
-          <div key={f} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-            <span className="mono" style={{ color: 'var(--amber)' }}>{f}</span>
-            <strong style={{ fontSize: '9px', textTransform: 'uppercase', color: 'var(--amber)' }}>modified</strong>
-          </div>
-        ))}
-        {status.untrackedFiles.map(f => (
-          <div key={f} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-            <span className="mono" style={{ color: 'var(--text-dim)' }}>{f}</span>
-            <strong style={{ fontSize: '9px', textTransform: 'uppercase', color: 'var(--text-dim)' }}>untracked</strong>
-          </div>
-        ))}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '150px', overflowY: 'auto', background: 'rgba(0,0,0,0.15)', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+        {status.stagedFiles && status.stagedFiles.map(f => renderRow(f, 'staged', 'var(--green)'))}
+        {status.modifiedFiles && status.modifiedFiles.map(f => renderRow(f, 'modified', 'var(--amber)'))}
+        {status.untrackedFiles && status.untrackedFiles.map(f => renderRow(f, 'untracked', 'var(--text-dim)'))}
+      </div>
+    );
+  };
+
+  const renderCommitForm = () => {
+    if (!status) return null;
+    const hasChanges = (status.stagedFiles && status.stagedFiles.length > 0) || 
+                       (status.modifiedFiles && status.modifiedFiles.length > 0) || 
+                       (status.untrackedFiles && status.untrackedFiles.length > 0);
+    if (!hasChanges) return null;
+
+    const filesToCommit = Object.keys(selectedFiles).filter(f => selectedFiles[f]);
+    const canCommit = filesToCommit.length > 0 && commitMessage.trim().length > 0 && !isCommitting;
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
+        <textarea
+          className="form-control"
+          rows={2}
+          value={commitMessage}
+          onChange={(e) => setCommitMessage(e.target.value)}
+          placeholder="Enter commit message..."
+          style={{ fontSize: '11.5px', padding: '6px 10px', resize: 'none', background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)' }}
+          disabled={isCommitting}
+        />
+        <button
+          className="btn-primary"
+          onClick={handleCommit}
+          disabled={!canCommit}
+          style={{ padding: '6px 12px', fontSize: '12px', width: '100%', background: canCommit ? 'var(--teal)' : 'var(--surface-3)', borderColor: canCommit ? 'var(--teal)' : 'var(--border)', color: canCommit ? 'var(--bg)' : 'var(--text-dim)', cursor: canCommit ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+        >
+          {isCommitting ? (
+            <>
+              <RefreshCw size={12} className="spin" />
+              <span>Committing...</span>
+            </>
+          ) : (
+            <span>Commit Changes ({filesToCommit.length})</span>
+          )}
+        </button>
       </div>
     );
   };
@@ -270,6 +367,7 @@ export default function GitActionCenter({
                     Working Tree Files
                   </span>
                   {renderChangesList()}
+                  {renderCommitForm()}
                 </div>
               </div>
 
@@ -443,6 +541,7 @@ export default function GitActionCenter({
                   Working Tree Files
                 </span>
                 {renderChangesList()}
+                {renderCommitForm()}
               </div>
             </div>
 
