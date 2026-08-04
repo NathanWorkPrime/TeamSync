@@ -56,6 +56,20 @@ let currentRepo = '';
 let currentBranch = '';
 let currentSessionLink = '';
 let activeStatusBarItem = null;
+const pendingNotifications = [];
+function queueNotification(type, message) {
+    const cleanMessage = message.replace(/^TeamSync( Alert)?: /, '');
+    const notification = {
+        id: Math.random().toString(36).substring(2, 9) + '-' + Date.now(),
+        type,
+        message: cleanMessage,
+        timestamp: Date.now()
+    };
+    pendingNotifications.push(notification);
+    if (pendingNotifications.length > 20) {
+        pendingNotifications.shift();
+    }
+}
 // Helper to make HTTP POST requests with zero dependencies
 function sendPostRequest(urlStr, body) {
     return new Promise((resolve, reject) => {
@@ -95,6 +109,28 @@ function queryGit(cmd, cwd) {
 }
 function activate(context) {
     console.log('TeamSync Companion Extension is now active!');
+    // Wrap VS Code notification APIs to automatically queue notifications for the web app
+    const originalShowInfo = vscode.window.showInformationMessage;
+    vscode.window.showInformationMessage = function (message, ...items) {
+        if (typeof message === 'string') {
+            queueNotification('info', message);
+        }
+        return originalShowInfo.call(vscode.window, message, ...items);
+    };
+    const originalShowWarning = vscode.window.showWarningMessage;
+    vscode.window.showWarningMessage = function (message, ...items) {
+        if (typeof message === 'string') {
+            queueNotification('warning', message);
+        }
+        return originalShowWarning.call(vscode.window, message, ...items);
+    };
+    const originalShowError = vscode.window.showErrorMessage;
+    vscode.window.showErrorMessage = function (message, ...items) {
+        if (typeof message === 'string') {
+            queueNotification('error', message);
+        }
+        return originalShowError.call(vscode.window, message, ...items);
+    };
     const updateServerUrl = () => {
         const configUrl = vscode.workspace.getConfiguration('teamsync').get('serverUrl');
         if (configUrl) {
@@ -272,6 +308,25 @@ function activate(context) {
         }
     }));
     app.use(express_1.default.json());
+    // GET /notifications - Retrieve recent notifications
+    app.get('/notifications', (req, res) => {
+        res.json(pendingNotifications);
+    });
+    // POST /test-notification - Trigger a test notification for integration validation
+    app.post('/test-notification', (req, res) => {
+        const { type, message } = req.body;
+        const msg = message || 'Test companion notification';
+        if (type === 'error') {
+            vscode.window.showErrorMessage(msg);
+        }
+        else if (type === 'warning') {
+            vscode.window.showWarningMessage(msg);
+        }
+        else {
+            vscode.window.showInformationMessage(msg);
+        }
+        res.json({ success: true });
+    });
     // GET /detect-repo-status - Check local repository status
     app.get('/detect-repo-status', async (req, res) => {
         const repo = req.query.repo;

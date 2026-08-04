@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { projectCache } from './utils/projectCache';
+import { Info, AlertTriangle, X } from 'lucide-react';
 import Topbar from './components/Topbar';
 import Login from './pages/Login';
 import Home from './pages/Home';
@@ -26,6 +27,54 @@ export default function App() {
   const [tickets, setTickets] = useState([]);
   const [integrations, setIntegrations] = useState([]);
   const [activePresence, setActivePresence] = useState([]);
+  
+  // Toast notifications state
+  const [toasts, setToasts] = useState([]);
+  const seenNotificationIds = useRef(new Set());
+
+  const addToast = (type, message) => {
+    const id = Math.random().toString(36).substring(2, 9) + '-' + Date.now();
+    setToasts(prev => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
+  const removeToast = (id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  // Poll companion extension notifications every 2 seconds
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let isMounted = true;
+    
+    const pollNotifications = async () => {
+      try {
+        const res = await fetch('http://localhost:37845/notifications');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!Array.isArray(data) || !isMounted) return;
+        
+        const newNotifications = data.filter(n => !seenNotificationIds.current.has(n.id));
+        newNotifications.forEach(n => {
+          seenNotificationIds.current.add(n.id);
+          addToast(n.type, n.message);
+        });
+      } catch (e) {
+        // Companion is offline, ignore gracefully
+      }
+    };
+
+    pollNotifications();
+    const interval = setInterval(pollNotifications, 2000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [currentUser]);
   
   // Home Page Aggregated State
   const [todayData, setTodayData] = useState({
@@ -971,6 +1020,35 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Toast Notification Container */}
+      <div className="toast-container">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`toast toast-${toast.type}`}>
+            <div className="toast-content-wrapper">
+              <div className="toast-icon">
+                {toast.type === 'info' && <Info size={16} style={{ color: 'var(--teal)' }} />}
+                {toast.type === 'warning' && <AlertTriangle size={16} style={{ color: 'var(--amber)' }} />}
+                {toast.type === 'error' && <AlertTriangle size={16} style={{ color: 'var(--red)' }} />}
+              </div>
+              <div className="toast-body">
+                <div className="toast-title">
+                  {toast.type === 'info' && 'TeamSync Companion'}
+                  {toast.type === 'warning' && 'TeamSync Warning'}
+                  {toast.type === 'error' && 'TeamSync Error'}
+                </div>
+                <div className="toast-message">{toast.message}</div>
+              </div>
+              <button className="toast-close" onClick={() => removeToast(toast.id)}>
+                <X size={14} />
+              </button>
+            </div>
+            <div className="toast-progress">
+              <div className="toast-progress-bar"></div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
