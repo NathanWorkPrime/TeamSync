@@ -20,6 +20,7 @@ export default function App() {
   const [users, setUsers] = useState([]);
   const [repos, setRepos] = useState([]);
   const [reposError, setReposError] = useState(null);
+  const [reposErrorResetAt, setReposErrorResetAt] = useState(null);
   const [selectedRepo, setSelectedRepo] = useState(null);
   const [branches, setBranches] = useState([]);
   const [tickets, setTickets] = useState([]);
@@ -61,6 +62,7 @@ export default function App() {
   const fetchRepos = async () => {
     try {
       setReposError(null);
+      setReposErrorResetAt(null);
       const headers = {};
       const cached = localStorage.getItem('teamsync_current_user');
       let activeUser = currentUser;
@@ -77,6 +79,9 @@ export default function App() {
       } else {
         const errData = await res.json().catch(() => ({}));
         setReposError(errData.message || 'Failed to verify repository access.');
+        if (errData.resetAt) {
+          setReposErrorResetAt(errData.resetAt);
+        }
       }
     } catch (err) {
       console.error('Error fetching repos:', err);
@@ -788,6 +793,7 @@ export default function App() {
           <Projects 
             repos={repos} 
             reposError={reposError} 
+            reposErrorResetAt={reposErrorResetAt}
             onSelectRepo={handleSelectRepo} 
             onRegisterSuccess={fetchRepos} 
             onRetry={fetchRepos}

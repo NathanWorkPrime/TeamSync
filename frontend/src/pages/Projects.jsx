@@ -1,9 +1,37 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Plus, AlertTriangle, RefreshCw, FolderPlus } from 'lucide-react';
 
-export default function Projects({ repos, reposError, onSelectRepo, onRegisterSuccess, onRetry }) {
+export default function Projects({ repos, reposError, reposErrorResetAt, onSelectRepo, onRegisterSuccess, onRetry }) {
   const [activeTab, setActiveTab] = useState('register');
   const [shareCode, setShareCode] = useState('');
+  const [timeLeft, setTimeLeft] = useState(null);
+
+  useEffect(() => {
+    if (!reposErrorResetAt) {
+      setTimeLeft(null);
+      return;
+    }
+
+    const calculateTimeLeft = () => {
+      const remaining = Math.max(0, Math.ceil(reposErrorResetAt - Date.now() / 1000));
+      setTimeLeft(remaining);
+    };
+
+    calculateTimeLeft();
+    const interval = setInterval(calculateTimeLeft, 1000);
+
+    return () => clearInterval(interval);
+  }, [reposErrorResetAt]);
+
+  const formatTimeLeft = (seconds) => {
+    if (seconds <= 0) return '0s';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m > 0) {
+      return `${m}m ${s}s`;
+    }
+    return `${s}s`;
+  };
   
   const getHeaders = (extraHeaders = {}) => {
     const cached = localStorage.getItem('teamsync_current_user');
@@ -156,16 +184,34 @@ export default function Projects({ repos, reposError, onSelectRepo, onRegisterSu
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <AlertTriangle size={18} />
-            <span style={{ fontSize: '13px', fontWeight: 500 }}>{reposError}</span>
+            <span style={{ fontSize: '13px', fontWeight: 500 }}>
+              {reposError}
+              {timeLeft !== null && timeLeft > 0 && (
+                <span style={{ marginLeft: '8px', color: 'var(--red)', fontWeight: 600 }}>
+                  (Resetting in {formatTimeLeft(timeLeft)})
+                </span>
+              )}
+            </span>
           </div>
           {onRetry && (
             <button 
               onClick={onRetry} 
+              disabled={timeLeft !== null && timeLeft > 0}
               className="btn-secondary" 
-              style={{ padding: '6px 12px', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--red)', borderColor: 'var(--red)' }}
+              style={{ 
+                padding: '6px 12px', 
+                fontSize: '12px', 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '4px', 
+                color: 'var(--red)', 
+                borderColor: 'var(--red)',
+                opacity: (timeLeft !== null && timeLeft > 0) ? 0.5 : 1,
+                cursor: (timeLeft !== null && timeLeft > 0) ? 'not-allowed' : 'pointer'
+              }}
             >
               <RefreshCw size={13} className="retry-icon" />
-              Retry Verification
+              {timeLeft !== null && timeLeft > 0 ? 'Rate Limited' : 'Retry Verification'}
             </button>
           )}
         </div>

@@ -342,7 +342,12 @@ async function checkUserCollaboratorAccess(username, githubRepo, userToken) {
                           /API rate limit/i.test(bodyText);
                           
       if (isRateLimit) {
-        throw new Error('GitHub API rate limit exceeded');
+        const resetTime = response.headers.get('x-ratelimit-reset');
+        const err = new Error('GitHub API rate limit exceeded');
+        if (resetTime) {
+          err.resetAt = parseInt(resetTime, 10);
+        }
+        throw err;
       }
       
       collaboratorCache.set(cacheKey, { hasAccess: false, expiresAt: now + CACHE_TTL_MS });
@@ -414,7 +419,11 @@ async function authorizeRepoWriteAccess(req, res, next) {
       next();
     } catch (apiErr) {
       console.error(`[Auth] Failed to verify collaborator access for write action:`, apiErr.message);
-      return res.status(503).json({ error: 'GitHub Verification Error', message: 'Could not verify repository permissions.' });
+      return res.status(503).json({ 
+        error: 'GitHub Verification Error', 
+        message: 'Could not verify repository permissions.',
+        resetAt: apiErr.resetAt
+      });
     }
   });
 }
@@ -629,6 +638,7 @@ app.get('/api/repos', async (req, res) => {
     const filteredRepos = [];
     let checkFailed = false;
     let failureReason = '';
+    let resetAt = null;
     
     for (const repo of repos) {
       if (!repo.github_repo) {
@@ -644,6 +654,9 @@ app.get('/api/repos', async (req, res) => {
       } catch (err) {
         checkFailed = true;
         failureReason = err.message;
+        if (err.resetAt) {
+          resetAt = err.resetAt;
+        }
         break;
       }
     }
@@ -651,7 +664,8 @@ app.get('/api/repos', async (req, res) => {
     if (checkFailed) {
       return res.status(503).json({
         error: 'GitHub Access Verification Error',
-        message: `Could not verify collaborator access on GitHub: ${failureReason}. Please check your connection or reload the page.`
+        message: `Could not verify collaborator access on GitHub: ${failureReason}. Please check your connection or reload the page.`,
+        resetAt: resetAt
       });
     }
     
