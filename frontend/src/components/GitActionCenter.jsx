@@ -391,6 +391,178 @@ export default function GitActionCenter({
           </div>
         </div>
       )}
+
+      {/* Embedded Tab/Dashboard Variant */}
+      {variant === 'tab' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '16px 0' }}>
+          
+          {/* Health & Special Warnings */}
+          {status && (status.mergeState || status.rebaseState || status.detachedHead || status.upstreamTrackingMissing) && (
+            <div style={{ padding: '12px 16px', background: 'rgba(244,63,94,0.06)', border: '1px solid var(--red)', borderRadius: '8px', color: '#ff6b6b', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700 }}>
+                <AlertTriangle size={15} /> Active Git Workspace Warnings
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '20px', lineHeight: 1.5 }}>
+                {status.detachedHead && <li><strong>Detached HEAD Warning:</strong> You are not currently on any local branch. Commits made here will not be tracking remote updates!</li>}
+                {status.mergeState && <li><strong>Merge Conflicts / In-Progress:</strong> You have conflicts or an active merge operation in progress. Please resolve in the editor.</li>}
+                {status.rebaseState && <li><strong>Rebase In-Progress:</strong> You have an active rebase operation running. Complete the rebase before pulling or merging.</li>}
+                {status.upstreamTrackingMissing && <li><strong>Missing Upstream Tracking:</strong> The current local branch does not track any remote branch. Click <strong>Push</strong> to configure origin tracking.</li>}
+              </ul>
+            </div>
+          )}
+
+          {/* Status Grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            {/* Left Side details */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div className="card" style={{ padding: '14px 18px', minHeight: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-dim)' }}>Branch:</span>
+                  <strong className="mono" style={{ color: 'var(--teal)' }}>{status?.currentBranch}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-dim)' }}>Active Remote:</span>
+                  <span className="mono" style={{ fontSize: '11px', color: 'var(--text)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '180px' }} title={status?.activeRemote}>
+                    {status?.activeRemote || 'origin'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-dim)' }}>Commit HEAD:</span>
+                  <strong className="mono" style={{ color: 'var(--text)' }}>
+                    {status?.currentCommitHash ? status.currentCommitHash.substring(0, 7) : 'unknown'}
+                  </strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-dim)' }}>Status:</span>
+                  <strong style={{ color: getStatusColor() }}>{getCleanStatusString()}</strong>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <span style={{ fontSize: '11.5px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                  Working Tree Files
+                </span>
+                {renderChangesList()}
+              </div>
+            </div>
+
+            {/* Right Side: Sync Controls */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div className="card" style={{ padding: '16px', minHeight: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ fontSize: '12.5px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '4px' }}>
+                  Git Operations
+                </div>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <button 
+                    onClick={() => handleAction('fetch')}
+                    className="btn-secondary"
+                    style={{ padding: '8px', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                    disabled={!!activeAction}
+                  >
+                    <RefreshCw size={13} className={activeAction === 'fetch' ? 'spin' : ''} />
+                    <span>Fetch</span>
+                  </button>
+                  <button 
+                    onClick={() => handleAction('pull')}
+                    className="btn-secondary"
+                    style={{ padding: '8px', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                    disabled={!!activeAction}
+                  >
+                    <ArrowDown size={13} className={activeAction === 'pull' ? 'spin' : ''} />
+                    <span>Pull</span>
+                  </button>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <button 
+                    onClick={() => handleAction('push')}
+                    className="btn-secondary"
+                    style={{ padding: '8px', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                    disabled={!!activeAction}
+                  >
+                    <ArrowUp size={13} className={activeAction === 'push' ? 'spin' : ''} />
+                    <span>Push</span>
+                  </button>
+                  <button 
+                    onClick={() => handleAction('sync')}
+                    className="btn-primary"
+                    style={{ padding: '8px', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', background: 'var(--teal)', borderColor: 'var(--teal)' }}
+                    disabled={!!activeAction}
+                  >
+                    <RefreshCw size={13} className={activeAction === 'sync' ? 'spin' : ''} />
+                    <span>Smart Sync</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (window.confirm("Stash all local modifications (including untracked files) to clean the workspace?")) {
+                      handleAction('stash');
+                    }
+                  }}
+                  className="btn-secondary"
+                  style={{ padding: '8px', fontSize: '12.5px', marginTop: '4px', color: 'var(--amber)', border: '1px solid rgba(245,158,11,0.2)' }}
+                  disabled={!!activeAction || (status && status.isClean)}
+                >
+                  Stash Changes (-u)
+                </button>
+              </div>
+
+              {/* Operation Timestamps */}
+              {status && (
+                <div style={{ fontSize: '11px', color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: '4px', padding: '0 8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Last Fetch:</span>
+                    <span>{status.lastFetch ? new Date(status.lastFetch).toLocaleTimeString() : 'never'}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Last Pull:</span>
+                    <span>{status.lastPull ? new Date(status.lastPull).toLocaleTimeString() : 'never'}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Last Push:</span>
+                    <span>{status.lastPush ? new Date(status.lastPush).toLocaleTimeString() : 'never'}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Console Log Terminal */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '11.5px', fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Terminal size={12} /> Operation Terminal Console Log
+              </span>
+              <button 
+                onClick={() => setOperationLog('')}
+                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+              >
+                Clear Console
+              </button>
+            </div>
+            
+            <div style={{
+              height: '140px',
+              background: '#0a0f1d',
+              border: '1px solid var(--border)',
+              borderRadius: '8px',
+              padding: '12px 16px',
+              fontFamily: 'monospace',
+              fontSize: '11.5px',
+              color: '#4dedea',
+              overflowY: 'auto',
+              whiteSpace: 'pre-wrap',
+              boxShadow: 'inset 0 4px 12px rgba(0,0,0,0.5)'
+            }}>
+              {operationLog || 'Console terminal active. Execute Git operations above to trace output.'}
+              <div ref={logEndRef} />
+            </div>
+          </div>
+
+        </div>
+      )}
     </>
   );
 }

@@ -1321,7 +1321,8 @@ export default function BranchMap({
                 {[
                   { id: 'history', label: 'History Logs', icon: <History size={14} /> },
                   { id: 'changelog', label: 'Changelog Entries', icon: <FileText size={14} /> },
-                  { id: 'protection', label: 'Branch Protection', icon: <Lock size={14} /> }
+                  { id: 'protection', label: 'Branch Protection', icon: <Lock size={14} /> },
+                  { id: 'console', label: 'Git Console', icon: <Terminal size={14} /> }
                 ].map(t => {
                   const isActive = activeTab === t.id;
                   return (
@@ -1631,6 +1632,21 @@ export default function BranchMap({
                         No protection settings available.
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* GIT ACTION CENTER TAB CONTENT */}
+                {activeTab === 'console' && (
+                  <div style={{ padding: '8px 0' }}>
+                    <GitActionCenter
+                      repoName={repoName}
+                      githubRepo={githubRepo}
+                      status={localGitStatus}
+                      companionOnline={companionOnline}
+                      onRefreshStatus={fetchBranches}
+                      variant="tab"
+                      branchName={selectedBranchData.name}
+                    />
                   </div>
                 )}
 
