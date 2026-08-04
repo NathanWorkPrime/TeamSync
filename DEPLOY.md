@@ -80,11 +80,12 @@ Request from their developers:
 
 ## 5. Companion Extension Setup for Developers
 
-For automated room launching, each developer should install the `teamsync-extension` on their machine:
+For automated room launching, each developer should install the `teamsync-extension` on their machine. Since the built `.vsix` file is no longer tracked in the repository, it must be compiled and packaged locally:
 
 1. Package the extension:
    ```bash
    cd teamsync-extension
+   npm install
    npx vsce package
    ```
 2. Install the generated `.vsix` file in VS Code/Antigravity (`Extensions -> Install from VSIX...`).
