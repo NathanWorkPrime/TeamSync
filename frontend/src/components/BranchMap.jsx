@@ -19,7 +19,8 @@ import {
   AlertCircle,
   Lock,
   Monitor,
-  Trash2
+  Trash2,
+  FolderOpen
 } from 'lucide-react';
 
 export default function BranchMap({ 
