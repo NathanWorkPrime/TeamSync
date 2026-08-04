@@ -491,7 +491,13 @@ app.get('/api/auth/github', (req, res) => {
   if (!clientStatus.configured) {
     if (process.env.ALLOW_DEV_MOCK_LOGIN === 'true') {
       console.log('[OAuth] GITHUB_CLIENT_ID/SECRET not configured. Redirecting with Developer Bypass (Sandbox Mode).');
-      return res.redirect(`${origin}/?username=you`);
+      const encryption = require('./services/encryption');
+      const tokenPayload = JSON.stringify({
+        username: 'you',
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hour session expiration
+      });
+      const sessionToken = encryption.encrypt(tokenPayload);
+      return res.redirect(`${origin}/?username=you&session_token=${encodeURIComponent(sessionToken)}`);
     } else {
       console.error('[OAuth] GitHub OAuth is not configured and Developer Bypass is disabled.');
       return res.redirect(`${origin}/?error=oauth_not_configured`);
@@ -619,7 +625,7 @@ app.get('/api/repos', async (req, res) => {
     const user = req.user;
     
     if (!user) {
-      return res.json(repos);
+      return res.status(401).json({ error: 'Authentication required.' });
     }
     
     // Local fallback users see everything
