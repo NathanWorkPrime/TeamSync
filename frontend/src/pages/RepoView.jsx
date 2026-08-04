@@ -110,7 +110,7 @@ export default function RepoView({
 
   // Local Git Workspace integration state
   const [activeOperations, setActiveOperations] = useState({}); // { [branchName]: 'status_message' }
-  const [localWarningModal, setLocalWarningModal] = useState({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+  const [localWarningModal, setLocalWarningModal] = useState({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
   const [localGitStatus, setLocalGitStatus] = useState(null);
   const [companionOnline, setCompanionOnline] = useState(false);
 
@@ -748,7 +748,8 @@ export default function RepoView({
           branchName,
           currentBranch: status.currentBranch || 'unknown',
           path: status.path,
-          nextStep
+          nextStep,
+          isCurrentBranch: status.currentBranch === branchName
         });
         setActiveOperations(prev => {
           const next = { ...prev };
@@ -2495,16 +2496,26 @@ export default function RepoView({
             </h3>
             
             <p style={{ fontSize: '13.5px', color: '#ffffff', lineHeight: 1.5, margin: '0 0 20px 0' }}>
-              Your local repository copy has uncommitted changes on branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
-              <br /><br />
-              Switching to branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.branchName}</strong> may cause Git checkout conflicts. What would you like to do?
+              {localWarningModal.isCurrentBranch ? (
+                <>
+                  Your local repository copy has uncommitted changes on the active branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
+                  <br /><br />
+                  Opening this branch in your local editor is safe, but fetching or pulling remote updates could cause conflicts with your local changes. What would you like to do?
+                </>
+              ) : (
+                <>
+                  Your local repository copy has uncommitted changes on branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.currentBranch}</strong>.
+                  <br /><br />
+                  Switching to branch <strong className="mono" style={{ color: 'var(--teal)' }}>{localWarningModal.branchName}</strong> may cause Git checkout conflicts. What would you like to do?
+                </>
+              )}
             </p>
             
             <div className="modal-actions" style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
               <button 
                 type="button" 
                 className="btn-secondary" 
-                onClick={() => setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' })}
+                onClick={() => setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false })}
                 style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer' }}
               >
                 Cancel
@@ -2514,22 +2525,23 @@ export default function RepoView({
                 className="btn-secondary" 
                 onClick={() => {
                   executeCloneOrCheckout(localWarningModal.branchName, false, localWarningModal.nextStep);
-                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
                 }}
                 style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', border: '1px solid var(--border)' }}
               >
-                Checkout anyway
+                {localWarningModal.isCurrentBranch ? 'Open anyway' : 'Checkout anyway'}
               </button>
               <button 
                 type="button" 
                 className="btn-primary" 
                 onClick={() => {
-                  executeCloneOrCheckout(localWarningModal.branchName, true, 'Stashing changes & switching...');
-                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '' });
+                  const statusMsg = localWarningModal.isCurrentBranch ? 'Stashing changes & opening...' : 'Stashing changes & switching...';
+                  executeCloneOrCheckout(localWarningModal.branchName, true, statusMsg);
+                  setLocalWarningModal({ isOpen: false, branchName: '', currentBranch: '', path: '', nextStep: '', isCurrentBranch: false });
                 }}
                 style={{ padding: '8px 16px', fontSize: '13px', cursor: 'pointer', background: 'var(--teal)', borderColor: 'var(--teal)' }}
               >
-                Stash & Switch
+                {localWarningModal.isCurrentBranch ? 'Stash & Open' : 'Stash & Switch'}
               </button>
             </div>
           </div>
