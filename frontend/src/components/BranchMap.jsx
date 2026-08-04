@@ -59,8 +59,6 @@ export default function BranchMap({
   const [activeTab, setActiveTab] = useState('history'); // 'history', 'changelog'
 
   const [cloneStates, setCloneStates] = useState({}); // { [branchName]: { status, errorMsg } }
-  const [pullStates, setPullStates] = useState({}); // { [branchName]: { status, errorMsg } }
-  const [pushStates, setPushStates] = useState({}); // { [branchName]: { status, errorMsg } }
   const [mergeStates, setMergeStates] = useState({}); // { [branchName]: { status, conflictedFiles, errorMsg, target } }
   
   const [historyEvents, setHistoryEvents] = useState([]);
@@ -391,125 +389,6 @@ export default function BranchMap({
     }
   };
 
-  const handlePull = async (branchName) => {
-    setPullStates(prev => ({
-      ...prev,
-      [branchName]: { status: 'loading' }
-    }));
-
-    try {
-      const res = await fetch('http://localhost:37845/pull-repo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo: githubRepo || repoName,
-          branch: branchName
-        })
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to pull repository updates.');
-      }
-
-      setPullStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'success' }
-      }));
-
-      // Publish event to the central event bus
-      try {
-        await fetch('/api/events', {
-          method: 'POST',
-          headers: getHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            event_type: 'repo:pulled',
-            event_category: 'project',
-            repo_name: repoName,
-            branch_name: branchName,
-            user_id: currentUser?.id || 1,
-            metadata: { action: 'pull', branch: branchName }
-          })
-        });
-      } catch (e) {}
-
-      setTimeout(() => {
-        setPullStates(prev => ({
-          ...prev,
-          [branchName]: { status: 'idle' }
-        }));
-      }, 5000);
-
-      if (fetchBranches) fetchBranches();
-
-    } catch (err) {
-      console.error('[BranchMap] Pull failed:', err);
-      setPullStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'error', errorMsg: err.message }
-      }));
-    }
-  };
-
-  const handlePush = async (branchName) => {
-    setPushStates(prev => ({
-      ...prev,
-      [branchName]: { status: 'loading' }
-    }));
-
-    try {
-      const res = await fetch('http://localhost:37845/push-repo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo: githubRepo || repoName,
-          branch: branchName
-        })
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to push repository commits.');
-      }
-
-      setPushStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'success' }
-      }));
-
-      // Publish event to the central event bus
-      try {
-        await fetch('/api/events', {
-          method: 'POST',
-          headers: getHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            event_type: 'repo:pushed',
-            event_category: 'project',
-            repo_name: repoName,
-            branch_name: branchName,
-            user_id: currentUser?.id || 1,
-            metadata: { action: 'push', branch: branchName }
-          })
-        });
-      } catch (e) {}
-
-      setTimeout(() => {
-        setPushStates(prev => ({
-          ...prev,
-          [branchName]: { status: 'idle' }
-        }));
-      }, 5000);
-
-      if (fetchBranches) fetchBranches();
-
-    } catch (err) {
-      console.error('[BranchMap] Push failed:', err);
-      setPushStates(prev => ({
-        ...prev,
-        [branchName]: { status: 'error', errorMsg: err.message }
-      }));
-    }
-  };
 
   const fetchPrDetails = async () => {
     if (!selectedBranchData?.pr?.number) return;
@@ -1180,62 +1059,27 @@ export default function BranchMap({
                 
                 {(() => {
                     const state = cloneStates[selectedBranchData.name] || { status: 'idle' };
-                    const pullState = pullStates[selectedBranchData.name] || { status: 'idle' };
-                    const pushState = pushStates[selectedBranchData.name] || { status: 'idle' };
-                    let btnText = 'Sync with GitHub';
                     let btnStyle = { padding: '8px 16px', fontSize: '12.5px' };
-                    
-                    if (selectedBranchData.localAhead > 0 || selectedBranchData.localBehind > 0) {
-                      const aheadText = selectedBranchData.localAhead > 0 ? `${selectedBranchData.localAhead} ahead` : '';
-                      const behindText = selectedBranchData.localBehind > 0 ? `${selectedBranchData.localBehind} behind` : '';
-                      const counts = [aheadText, behindText].filter(Boolean).join(', ');
-                      btnText = `Sync Workspace (${counts})`;
-                    }
                     
                     return (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'stretch' }}>
-                        {/* Primary Sync Workspace Button */}
+                        {/* Primary Open in VS Code Button */}
                         <div style={{ display: 'flex', gap: '6px' }}>
                           <button 
                             className={`local-btn ${state.status === 'loading' ? 'loading' : state.status === 'success' ? 'success' : state.status === 'error' ? 'error' : ''}`}
                             style={{ ...btnStyle, flexGrow: 1 }}
                             onClick={() => handleGetLocal(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Sync Workspace (Combined): Pull remote changes then Push local commits."
+                            disabled={state.status === 'loading'}
+                            title="Clones the repository if needed, switches to the branch, and opens it locally in VS Code."
                           >
-                            {state.status === 'loading' && <RefreshCw size={12} className="spin" style={{ marginRight: '6px' }} />}
-                            {state.status === 'success' && <span style={{ marginRight: '4px' }}>✓</span>}
-                            {state.status === 'error' && <span style={{ marginRight: '4px' }}>⚠</span>}
-                            {btnText}
-                          </button>
-                        </div>
-                        
-                        {/* Sub-actions Pull/Push for finer control */}
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <button
-                            className={`local-btn ${pullState.status === 'loading' ? 'loading' : pullState.status === 'success' ? 'success' : pullState.status === 'error' ? 'error' : ''}`}
-                            style={{ padding: '6px 12px', fontSize: '11.5px', background: 'var(--surface-3)', color: 'var(--text)', border: '1px solid var(--border)', flexGrow: 1 }}
-                            onClick={() => handlePull(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Pull: Fetch and pull remote changes into local files only."
-                          >
-                            {pullState.status === 'loading' && <RefreshCw size={11} className="spin" style={{ marginRight: '4px' }} />}
-                            {pullState.status === 'success' && <span style={{ marginRight: '4px', color: 'var(--green)' }}>✓</span>}
-                            {pullState.status === 'error' && <span style={{ marginRight: '4px', color: 'var(--red)' }}>⚠</span>}
-                            Pull Remote
-                          </button>
-                          
-                          <button
-                            className={`local-btn ${pushState.status === 'loading' ? 'loading' : pushState.status === 'success' ? 'success' : pushState.status === 'error' ? 'error' : ''}`}
-                            style={{ padding: '6px 12px', fontSize: '11.5px', background: 'var(--surface-3)', color: 'var(--text)', border: '1px solid var(--border)', flexGrow: 1 }}
-                            onClick={() => handlePush(selectedBranchData.name)}
-                            disabled={state.status === 'loading' || pullState.status === 'loading' || pushState.status === 'loading'}
-                            title="Push: Push local commits to remote without pulling first."
-                          >
-                            {pushState.status === 'loading' && <RefreshCw size={11} className="spin" style={{ marginRight: '4px' }} />}
-                            {pushState.status === 'success' && <span style={{ marginRight: '4px', color: 'var(--green)' }}>✓</span>}
-                            {pushState.status === 'error' && <span style={{ marginRight: '4px', color: 'var(--red)' }}>⚠</span>}
-                            Push Commits
+                            {state.status === 'loading' ? (
+                              <RefreshCw size={12} className="spin" style={{ marginRight: '6px' }} />
+                            ) : (
+                              <FolderOpen size={12} style={{ marginRight: '6px' }} />
+                            )}
+                            {state.status === 'success' && <span style={{ marginRight: '4px' }}>✓ </span>}
+                            {state.status === 'error' && <span style={{ marginRight: '4px' }}>⚠ </span>}
+                            Open in VS Code
                           </button>
                         </div>
 
@@ -1243,16 +1087,6 @@ export default function BranchMap({
                         {state.status === 'error' && state.errorMsg && (
                           <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
                             {state.errorMsg}
-                          </div>
-                        )}
-                        {pullState.status === 'error' && pullState.errorMsg && (
-                          <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
-                            Pull failed: {pullState.errorMsg}
-                          </div>
-                        )}
-                        {pushState.status === 'error' && pushState.errorMsg && (
-                          <div style={{ color: 'var(--red)', fontSize: '11px', maxWidth: '300px', textAlign: 'right', whiteSpace: 'normal', wordBreak: 'break-word', marginTop: '2px' }}>
-                            Push failed: {pushState.errorMsg}
                           </div>
                         )}
                       </div>
