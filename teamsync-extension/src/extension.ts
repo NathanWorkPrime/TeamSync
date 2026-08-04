@@ -1476,7 +1476,19 @@ export function activate(context: vscode.ExtensionContext) {
         
         // 4.5. Push the merge commit to remote and verify success
         showInfo(`TeamSync: Pushing merge commit to origin/${targetBranch}...`);
-        await runCmd(`git push origin ${targetBranch}`, targetDir);
+        try {
+          await runCmd(`git push origin ${targetBranch}`, targetDir);
+        } catch (pushErr: any) {
+          // Push failed - undo the local merge commit to keep local in sync with remote!
+          console.warn('[TeamSync Companion] Push failed, resetting branch:', pushErr.message);
+          await runCmd(`git reset --hard origin/${targetBranch}`, targetDir).catch(() => {});
+          
+          const errMsg = pushErr.message || '';
+          if (errMsg.includes('protected branch') || errMsg.includes('Protected branch') || errMsg.includes('GH006')) {
+            throw new Error(`Blocked: ${targetBranch} is a protected branch, requires a pull request.`);
+          }
+          throw pushErr;
+        }
         
         // Post event to backend
         try {
