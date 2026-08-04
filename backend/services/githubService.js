@@ -160,8 +160,8 @@ async function getBranches(repoName) {
     }
   }
 
-  // Union of local and remote branches
-  const allBranchNames = Array.from(new Set([...localBranchNames, ...remoteBranchNames]));
+  // Only return branches that exist on the live GitHub API
+  const allBranchNames = remoteBranchNames;
   
   // If we have no branches at all (empty or uninitialized), return empty array
   if (allBranchNames.length === 0) {
