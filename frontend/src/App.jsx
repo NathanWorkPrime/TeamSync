@@ -288,6 +288,16 @@ export default function App() {
     if (repoDetails) {
       projectCache.setProjectMeta(repoName, repoDetails);
     }
+    
+    // Clear branches state to avoid showing stale data from the previous project.
+    // If cached data is available, populate immediately to avoid flashing skeletons.
+    const cachedBranches = projectCache.getTabData(repoName, 'branches');
+    if (cachedBranches) {
+      setBranches(cachedBranches);
+    } else {
+      setBranches([]);
+    }
+
     setSelectedRepo(repoName);
     setActiveView('repo');
 
@@ -786,6 +796,7 @@ export default function App() {
       case 'repo':
         return (
           <RepoView 
+            key={selectedRepo}
             repoName={selectedRepo} 
             githubRepo={repos.find(r => r.name === selectedRepo)?.github_repo}
             onBack={() => setActiveView('projects')} 

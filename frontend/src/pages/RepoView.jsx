@@ -24,7 +24,8 @@ import {
   MessageSquare,
   Settings,
   BarChart2,
-  Monitor
+  Monitor,
+  RefreshCw
 } from 'lucide-react';
 
 export default function RepoView({ 
@@ -69,15 +70,13 @@ export default function RepoView({
     return headers;
   };
 
-  const [isInitializing, setIsInitializing] = useState(true);
-  const [visitedTabs, setVisitedTabs] = useState({ sessions: true }); // Default tab
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsInitializing(false);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, []);
+  const [visitedTabs, setVisitedTabs] = useState({
+    sessions: true,
+    source_control: true,
+    deployments: true,
+    tasks: true,
+    overview: true
+  });
 
   const [localSubTab, setLocalSubTab] = useState('sessions');
   const subTab = propsSubTab !== undefined ? propsSubTab : localSubTab;
@@ -1205,15 +1204,6 @@ export default function RepoView({
 
         {/* Subview Content Area */}
         <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          {isInitializing ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '28px', width: '100%', padding: '20px 0' }}>
-              <div className="skeleton" style={{ height: '120px', width: '100%', borderRadius: '12px' }} />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '24px' }}>
-                <div className="skeleton" style={{ height: '320px', borderRadius: '12px' }} />
-                <div className="skeleton" style={{ height: '320px', borderRadius: '12px' }} />
-              </div>
-            </div>
-          ) : (
             <>
           
           {/* OVERVIEW SUBVIEW (TONED DOWN) */}
@@ -2000,7 +1990,6 @@ export default function RepoView({
             </div>
           )}
             </>
-          )}
         </div>
       </div>
 
