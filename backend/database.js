@@ -13,6 +13,8 @@ const dbReady = new Promise((resolve) => {
   resolveDbReady = resolve;
 });
 
+
+
 if (usePostgres) {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL
@@ -206,59 +208,7 @@ function initializeSchema() {
       });
     });
 
-    // Migrate existing tables to support multi-tenancy Phase 1
-    const tablesToMigrate = ['users', 'repositories', 'tickets', 'session_rooms', 'deployments', 'chat_messages', 'events'];
-    tablesToMigrate.forEach(tableName => {
-      db.run(`ALTER TABLE ${tableName} ADD COLUMN organization_id INTEGER DEFAULT 1`, (err) => {
-        // Run update to catch any rows created with NULL values
-        db.run(`UPDATE ${tableName} SET organization_id = 1 WHERE organization_id IS NULL`);
-      });
-    });
-
-    // Add share_code to repositories (non-unique ALTER to bypass SQLite UNIQUE constraint restriction)
-    db.run("ALTER TABLE repositories ADD COLUMN share_code TEXT", (err) => {
-      // Backfill any repositories missing a share_code
-      db.all("SELECT id, name FROM repositories WHERE share_code IS NULL", [], (selectErr, rows) => {
-        if (!selectErr && rows && rows.length > 0) {
-          const crypto = require('crypto');
-          let completed = 0;
-          rows.forEach(row => {
-            const code = 'TS-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-            console.log(`[Database] Backfilling share code for repository ${row.name}: ${code}`);
-            db.run("UPDATE repositories SET share_code = ? WHERE id = ?", [code, row.id], (updateErr) => {
-              completed++;
-              if (completed === rows.length) {
-                createShareCodeIndex();
-              }
-            });
-          });
-        } else {
-          createShareCodeIndex();
-        }
-      });
-    });
-
-    function createShareCodeIndex() {
-      db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_share_code ON repositories(share_code)");
-    }
-
-    // Add local_path to repositories
-    db.run("ALTER TABLE repositories ADD COLUMN local_path TEXT", (err) => {
-      // Backfill any repositories missing a local_path
-      db.all("SELECT id, name FROM repositories WHERE local_path IS NULL", [], (selectErr, rows) => {
-        if (!selectErr && rows && rows.length > 0) {
-          const path = require('path');
-          const appRoot = path.resolve(__dirname, '../'); // resolves to the app root (e.g. d:\Tech-Finity\TeamDash)
-          const parentDir = path.resolve(__dirname, '../../'); // resolves to parent directory (e.g. d:\Tech-Finity)
-          
-          rows.forEach(row => {
-            const resolvedPath = row.name === 'TeamSync' ? appRoot : path.join(parentDir, row.name);
-            console.log(`[Database] Backfilling local_path for repository ${row.name}: ${resolvedPath}`);
-            db.run("UPDATE repositories SET local_path = ? WHERE id = ?", [resolvedPath, row.id]);
-          });
-        }
-      });
-    });
+    // (Migrations moved to the bottom of the initialization sequence to avoid table-creation race conditions)
 
     // Create Users table
     db.run(`
@@ -267,7 +217,8 @@ function initializeSchema() {
         username TEXT UNIQUE,
         display_name TEXT,
         email TEXT,
-        avatar_color TEXT
+        avatar_color TEXT,
+        organization_id INTEGER DEFAULT 1
       )
     `, (err) => {
         db.run("ALTER TABLE users ADD COLUMN email TEXT", (alterErr) => {
@@ -298,6 +249,7 @@ function initializeSchema() {
         updated_at TEXT,
         last_synced_at TEXT,
         last_change_origin TEXT,
+        organization_id INTEGER DEFAULT 1,
         FOREIGN KEY (assignee_user_id) REFERENCES users(id)
       )
     `);
@@ -356,6 +308,7 @@ function initializeSchema() {
         user_id INTEGER,
         message TEXT,
         sent_at TEXT,
+        organization_id INTEGER DEFAULT 1,
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
@@ -371,7 +324,8 @@ function initializeSchema() {
         created_by_user_id INTEGER,
         created_at TEXT,
         closed_at TEXT,
-        status TEXT DEFAULT 'active'
+        status TEXT DEFAULT 'active',
+        organization_id INTEGER DEFAULT 1
       )
     `);
 
@@ -386,6 +340,7 @@ function initializeSchema() {
         status TEXT,
         deployed_at TEXT,
         changelog TEXT,
+        organization_id INTEGER DEFAULT 1,
         FOREIGN KEY (user_id) REFERENCES users(id)
       )
     `);
@@ -407,6 +362,7 @@ function initializeSchema() {
         ticket_id INTEGER,
         deployment_id INTEGER,
         metadata TEXT,
+        organization_id INTEGER DEFAULT 1,
         FOREIGN KEY (user_id) REFERENCES users(id),
         FOREIGN KEY (ticket_id) REFERENCES tickets(id),
         FOREIGN KEY (session_id) REFERENCES session_rooms(id)
@@ -422,32 +378,79 @@ function initializeSchema() {
         github_repo TEXT,
         allow_sandbox_deploy INTEGER DEFAULT 0,
         branch_strategy TEXT DEFAULT 'main-only',
-        created_at TEXT
+        created_at TEXT,
+        organization_id INTEGER DEFAULT 1
       )
     `);
 
-    // Migrate existing table if needed by adding allow_sandbox_deploy column
-    db.run("ALTER TABLE repositories ADD COLUMN allow_sandbox_deploy INTEGER DEFAULT 0", (err) => {
-      // Ignore if column already exists
-    });
+    // (Duplicate triggers removed; migrations are executed sequentially in runMigrations below)
 
-    db.run("ALTER TABLE repositories ADD COLUMN branch_strategy TEXT DEFAULT 'main-only'", (err) => {
-      // Ignore if column already exists
-    });
+    function backfillShareCodes(callback) {
+      db.all("SELECT id, name FROM repositories WHERE share_code IS NULL", [], (selectErr, rows) => {
+        if (selectErr) {
+          console.error("[Database Migration Error] Failed to query repositories for share_code backfill:", selectErr.message);
+          if (callback) callback();
+          return;
+        }
+        if (rows && rows.length > 0) {
+          const crypto = require('crypto');
+          let completed = 0;
+          rows.forEach(row => {
+            const code = 'TS-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+            console.log(`[Database] Backfilling share code for repository ${row.name}: ${code}`);
+            db.run("UPDATE repositories SET share_code = ? WHERE id = ?", [code, row.id], (updateErr) => {
+              if (updateErr) {
+                console.error(`[Database Migration Error] Failed to update share_code for repository ${row.name}:`, updateErr.message);
+              }
+              completed++;
+              if (completed === rows.length) {
+                createShareCodeIndex();
+                if (callback) callback();
+              }
+            });
+          });
+        } else {
+          createShareCodeIndex();
+          if (callback) callback();
+        }
+      });
+    }
 
-    // Migrate session_rooms table if needed by adding closed_at column
-    db.run("ALTER TABLE session_rooms ADD COLUMN closed_at TEXT", (err) => {
-      // Ignore if column already exists
-    });
+    function createShareCodeIndex() {
+      db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_repositories_share_code ON repositories(share_code)");
+    }
 
-    // Migrate deployments table if needed by adding changelog column
-    db.run("ALTER TABLE deployments ADD COLUMN changelog TEXT", (err) => {
-      // Ignore if column already exists
-    });
-
-    // Run startup updates to enforce correct values for TeamSync and Shift_Software
-    db.run("UPDATE repositories SET github_repo = 'NathanWorkPrime/TeamSync', allow_sandbox_deploy = 1 WHERE name = 'TeamSync'");
-    db.run("UPDATE repositories SET allow_sandbox_deploy = 0 WHERE name = 'Shift_Software'");
+    function backfillLocalPaths(callback) {
+      db.all("SELECT id, name FROM repositories WHERE local_path IS NULL", [], (selectErr, rows) => {
+        if (selectErr) {
+          console.error("[Database Migration Error] Failed to query repositories for local_path backfill:", selectErr.message);
+          callback();
+          return;
+        }
+        if (rows && rows.length > 0) {
+          const path = require('path');
+          const appRoot = path.resolve(__dirname, '../'); 
+          const parentDir = path.resolve(__dirname, '../../'); 
+          
+          let completed = 0;
+          rows.forEach(row => {
+            const resolvedPath = row.name === 'TeamSync' ? appRoot : path.join(parentDir, row.name);
+            console.log(`[Database] Backfilling local_path for repository ${row.name}: ${resolvedPath}`);
+            db.run("UPDATE repositories SET local_path = ? WHERE id = ?", [resolvedPath, row.id], (updateErr) => {
+              if (updateErr) {
+                console.error(`[Database Migration Error] Failed to update local_path for repository ${row.name}:`, updateErr.message);
+              }
+              completed++;
+              if (completed === rows.length) {
+                callback();
+              }
+            });
+          });
+        } else {
+          callback();
+        }
+      });
+    }
 
     // Create Documentation table
     db.run(`
@@ -504,28 +507,153 @@ function initializeSchema() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)`);
 
-    // Seed initial users if not skipped
-    const skipSeed = process.env.SKIP_SEED && process.env.SKIP_SEED.trim().toLowerCase() === 'true';
-    if (!skipSeed) {
-      db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
-        if (row && row.count === 0) {
-          console.log("Seeding users...");
-          const stmt = db.prepare("INSERT INTO users (username, display_name, email, avatar_color) VALUES (?, ?, ?, ?)");
-          stmt.run("you", "You", "you@company.com", "var(--violet)");
-          stmt.run("sarah", "Sarah", "sarah@company.com", "var(--violet)");
-          stmt.run("david", "David", "david@company.com", "var(--amber)");
-          stmt.run("tom", "Tom", "tom@company.com", "var(--red)");
-          stmt.finalize();
+    // Migration function that tracks pending migrations and resolves when finished
+    function runMigrations() {
+      const tablesToMigrate = ['users', 'repositories', 'tickets', 'session_rooms', 'deployments', 'chat_messages', 'events'];
+      return new Promise((resolve) => {
+        let pending = tablesToMigrate.length + 6; // 7 tablesToMigrate + 6 additional columns/indexes
+        
+        function done() {
+          pending--;
+          if (pending === 0) {
+            resolve();
+          }
         }
+
+        // 1. Multi-tenancy migrations
+        tablesToMigrate.forEach(tableName => {
+          db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, [tableName], (err, row) => {
+            if (err) {
+              console.error(`[Database Migration Error] Failed to check existence of ${tableName}:`, err.message);
+              done();
+              return;
+            }
+            if (!row) {
+              done();
+              return;
+            }
+            db.all(`PRAGMA table_info(${tableName})`, [], (infoErr, columns) => {
+              if (infoErr) {
+                console.error(`[Database Migration Error] Failed to read schema info for ${tableName}:`, infoErr.message);
+                done();
+                return;
+              }
+              const hasOrgId = columns && columns.some(col => col.name === 'organization_id');
+              if (!hasOrgId) {
+                console.log(`[Database Migration] Adding missing organization_id column to ${tableName} table...`);
+                db.run(`ALTER TABLE ${tableName} ADD COLUMN organization_id INTEGER DEFAULT 1`, (alterErr) => {
+                  if (alterErr) {
+                    console.error(`[Database Migration Error] Failed to alter table ${tableName} to add organization_id:`, alterErr.message);
+                    done();
+                    return;
+                  }
+                  db.run(`UPDATE ${tableName} SET organization_id = 1 WHERE organization_id IS NULL`, (updateErr) => {
+                    if (updateErr) {
+                      console.error(`[Database Migration Error] Failed to update organization_id on ${tableName}:`, updateErr.message);
+                    }
+                    done();
+                  });
+                });
+              } else {
+                done();
+              }
+            });
+          });
+        });
+
+        // 2. share_code migration
+        db.all("PRAGMA table_info(repositories)", [], (infoErr, columns) => {
+          if (infoErr) {
+            console.error("[Database Migration Error] Failed to read schema info for repositories:", infoErr.message);
+            done();
+            return;
+          }
+          const hasShareCode = columns && columns.some(col => col.name === 'share_code');
+          if (!hasShareCode) {
+            console.log("[Database Migration] Adding missing share_code column to repositories table...");
+            db.run("ALTER TABLE repositories ADD COLUMN share_code TEXT", (alterErr) => {
+              if (alterErr) {
+                console.error("[Database Migration Error] Failed to add share_code column to repositories:", alterErr.message);
+                done();
+                return;
+              }
+              backfillShareCodes(done);
+            });
+          } else {
+            createShareCodeIndex();
+            done();
+          }
+        });
+
+        // 3. local_path migration
+        db.all("PRAGMA table_info(repositories)", [], (infoErr, columns) => {
+          if (infoErr) {
+            console.error("[Database Migration Error] Failed to read schema info for repositories:", infoErr.message);
+            done();
+            return;
+          }
+          const hasLocalPath = columns && columns.some(col => col.name === 'local_path');
+          if (!hasLocalPath) {
+            console.log("[Database Migration] Adding missing local_path column to repositories table...");
+            db.run("ALTER TABLE repositories ADD COLUMN local_path TEXT", (alterErr) => {
+              if (alterErr) {
+                console.error("[Database Migration Error] Failed to add local_path column to repositories:", alterErr.message);
+                done();
+                return;
+              }
+              backfillLocalPaths(done);
+            });
+          } else {
+            done();
+          }
+        });
+
+        // 4. allow_sandbox_deploy migration
+        db.run("ALTER TABLE repositories ADD COLUMN allow_sandbox_deploy INTEGER DEFAULT 0", (err) => {
+          done();
+        });
+
+        // 5. branch_strategy migration
+        db.run("ALTER TABLE repositories ADD COLUMN branch_strategy TEXT DEFAULT 'main-only'", (err) => {
+          done();
+        });
+
+        // 6. closed_at migration
+        db.run("ALTER TABLE session_rooms ADD COLUMN closed_at TEXT", (err) => {
+          done();
+        });
+
+        // 7. changelog migration
+        db.run("ALTER TABLE deployments ADD COLUMN changelog TEXT", (err) => {
+          done();
+        });
       });
-    } else {
-      console.log("[Database] SKIP_SEED=true detected. Skipping user database seeding.");
     }
 
-    // TODO: Temporary stopgap for colleague onboarding.
-    // Replace with real project creation flow once registration UI access is defined for teams.
-    // Always seed core repositories on startup if they don't exist
-    db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
+    // Run migrations and then resolve/seed
+    runMigrations().then(() => {
+      // Run startup updates to enforce correct values for TeamSync and Shift_Software
+      db.run("UPDATE repositories SET github_repo = 'NathanWorkPrime/TeamSync', allow_sandbox_deploy = 1 WHERE name = 'TeamSync'");
+      db.run("UPDATE repositories SET allow_sandbox_deploy = 0 WHERE name = 'Shift_Software'");
+
+      // Seed initial users if not skipped
+      const skipSeed = process.env.SKIP_SEED && process.env.SKIP_SEED.trim().toLowerCase() === 'true';
+      if (!skipSeed) {
+        db.get("SELECT COUNT(*) as count FROM users", (err, row) => {
+          if (row && row.count === 0) {
+            console.log("Seeding users...");
+            const stmt = db.prepare("INSERT INTO users (username, display_name, email, avatar_color) VALUES (?, ?, ?, ?)");
+            stmt.run("you", "You", "you@company.com", "var(--violet)");
+            stmt.run("sarah", "Sarah", "sarah@company.com", "var(--violet)");
+            stmt.run("david", "David", "david@company.com", "var(--amber)");
+            stmt.run("tom", "Tom", "tom@company.com", "var(--red)");
+            stmt.finalize();
+          }
+        });
+      } else {
+        console.log("[Database] SKIP_SEED=true detected. Skipping user database seeding.");
+      }
+
       const finishSetup = () => {
         // Resolve TempRepo749 / teamsync-validation-test mismatch:
         // 1. Rename TempRepo749 to teamsync-validation-test, set github_repo, set allow_sandbox_deploy = 1
@@ -544,28 +672,33 @@ function initializeSchema() {
                 "INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at, organization_id) VALUES (?, ?, ?, ?, ?, 1)",
                 ["teamsync-validation-test", "E2E Validation Test Repository", "NathanWorkPrime/teamsync-validation-test", 1, now],
                 (insertErr) => {
+                  console.log("[Server] Database schema and migrations are ready.");
                   if (resolveDbReady) resolveDbReady();
                 }
               );
             } else {
+              console.log("[Server] Database schema and migrations are ready.");
               if (resolveDbReady) resolveDbReady();
             }
           });
         });
       };
 
-      if (row && row.count === 0) {
-        console.log("Seeding core repositories...");
-        const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
-        const now = new Date().toISOString();
-        stmt.run("TeamSync", "Operational control centre for software development.", "NathanWorkPrime/TeamSync", 1, now);
-        stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
-        stmt.finalize(() => {
+      // Always seed core repositories on startup if they don't exist
+      db.get("SELECT COUNT(*) as count FROM repositories", (err, row) => {
+        if (row && row.count === 0) {
+          console.log("Seeding core repositories...");
+          const stmt = db.prepare("INSERT INTO repositories (name, description, github_repo, allow_sandbox_deploy, created_at) VALUES (?, ?, ?, ?, ?)");
+          const now = new Date().toISOString();
+          stmt.run("TeamSync", "Operational control centre for software development.", "NathanWorkPrime/TeamSync", 1, now);
+          stmt.run("Shift_Software", "Real-time development collaboration platform.", "Tech-Finity/Shift_Software", 0, now);
+          stmt.finalize(() => {
+            finishSetup();
+          });
+        } else {
           finishSetup();
-        });
-      } else {
-        finishSetup();
-      }
+        }
+      });
     });
   });
 }
