@@ -510,6 +510,21 @@ app.get('/api/auth/github', (req, res) => {
   res.redirect(githubAuthUrl);
 });
 
+function validateAndCleanDisplayName(name, fallback) {
+  if (!name || typeof name !== 'string') {
+    return fallback;
+  }
+  const cleaned = name.trim().replace(/\s+/g, ' ');
+  if (cleaned.length === 0 || cleaned.length > 60) {
+    return fallback;
+  }
+  const nameRegex = /^[\p{L}\s\-'\.]+$/u;
+  if (!nameRegex.test(cleaned)) {
+    return fallback;
+  }
+  return cleaned;
+}
+
 // GET /api/auth/github/callback - Handle OAuth redirect and code exchange
 app.get('/api/auth/github/callback', async (req, res) => {
   const { code, state: origin } = req.query;
@@ -565,7 +580,7 @@ app.get('/api/auth/github/callback', async (req, res) => {
     
     const githubId = profile.id.toString();
     const username = profile.login.toLowerCase();
-    const displayName = profile.name || profile.login;
+    const displayName = validateAndCleanDisplayName(profile.name, profile.login);
     const email = profile.email || null;
     const avatarColor = 'var(--teal)'; // Unique color for GitHub OAuth accounts
     
