@@ -1,6 +1,57 @@
 import React from 'react';
 import { Sun, Moon, Settings } from 'lucide-react';
 
+export function getInitials(displayName, username) {
+  if (!displayName || typeof displayName !== 'string') {
+    return getFallbackInitials(username);
+  }
+
+  const tokens = displayName.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) {
+    return getFallbackInitials(username);
+  }
+
+  const limitedTokens = tokens.slice(0, 2);
+  const initials = limitedTokens.map(t => t[0]);
+  const allAreLetters = initials.every(char => /^[a-zA-Z]$/.test(char));
+
+  if (!allAreLetters) {
+    return getFallbackInitials(username);
+  }
+
+  return initials.join('').toUpperCase();
+}
+
+function getFallbackInitials(username) {
+  if (!username || typeof username !== 'string') {
+    return 'TS';
+  }
+  const cleanUser = username.trim();
+  if (cleanUser.length === 0) return 'TS';
+  return cleanUser.slice(0, 2).toUpperCase();
+}
+
+// Simple inline unit test assertion helper
+function assertEqual(actual, expected, testName) {
+  if (actual !== expected) {
+    console.error(`[Topbar Test Fail] ${testName}: Expected "${expected}", but got "${actual}"`);
+  } else {
+    console.log(`[Topbar Test Pass] ${testName}`);
+  }
+}
+
+// Run inline tests immediately on load to verify correctness
+try {
+  assertEqual(getInitials("John Doe", "johndoe"), "JD", "Normal two-word name");
+  assertEqual(getInitials("Sarah", "sarah"), "S", "Single-word name");
+  assertEqual(getInitials("", "nathanworkprime"), "NA", "Empty string with username fallback");
+  assertEqual(getInitials("   ", "nathanworkprime"), "NA", "Whitespace string with username fallback");
+  assertEqual(getInitials("1:nathan:Nathan, 3:conroy-byleveldt:conroy-Byleveldt", "nathanworkprime"), "NA", "Malformed multi-colon string");
+  assertEqual(getInitials(null, "sarah"), "SA", "Null display name");
+} catch (e) {
+  console.error("Error running Topbar getInitials inline tests:", e);
+}
+
 export default function Topbar({ activeView, onViewChange, currentUser, theme, onThemeToggle }) {
   return (
     <div className="topbar">
@@ -53,7 +104,7 @@ export default function Topbar({ activeView, onViewChange, currentUser, theme, o
         </button>
 
         <div className="avatar" style={{ backgroundColor: currentUser?.avatar_color || '#9D8CFF', color: 'rgba(15, 23, 42, 0.85)', position: 'relative' }}>
-          {currentUser?.display_name ? currentUser.display_name.split(' ').map(n => n[0]).join('').toUpperCase() : 'JM'}
+          {getInitials(currentUser?.display_name, currentUser?.username)}
         </div>
         <span>{currentUser?.display_name || 'You'}</span>
         <button 
